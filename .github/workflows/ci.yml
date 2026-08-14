@@ -1,0 +1,37 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.10"
+
+      - name: Install package
+        run: pip install -e "./software[dev]"
+
+      - name: Lint
+        run: ruff check software/src software/tests
+
+      - name: Type check
+        run: mypy software/src
+
+      - name: Import-direction check
+        run: |
+          # estimators/ and models/ must never import sensors/, firmware/, or ROS 2.
+          if grep -rEl "^\s*(from|import)\s+erp\.(sensors)" software/src/erp/estimators software/src/erp/models; then
+            echo "Import-direction violation: core module imports hardware." >&2
+            exit 1
+          fi
+
+      - name: Tests
+        run: pytest -q

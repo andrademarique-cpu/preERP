@@ -1,0 +1,77 @@
+<mujoco model="triple_pendulum_finger">
+
+  <!-- Opciones generales de simulación -->
+  <option gravity="0 0 -9.81" timestep="0.002"/>
+
+  <!-- Defaults: parámetros comunes para joints y geoms, completa a gusto -->
+  <default>
+    <joint type="hinge" axis="0 1 0" damping="0.1"/>
+    <geom type="capsule" size="0.02" rgba="0.8 0.3 0.3 1"/>
+  </default>
+
+  <visual>
+    <!-- Sube la luz ambiental general para que la escena no se vea oscura -->
+    <headlight ambient="0.4 0.4 0.4" diffuse="0.6 0.6 0.6" specular="0.1 0.1 0.1"/>
+  </visual>
+
+  <asset>
+    <!-- Fondo azul solido (mismo color en rgb1/rgb2 = sin degradado) -->
+    <texture type="skybox" builtin="flat" rgb1="0.4 0.6 0.9" rgb2="0.4 0.6 0.9" width="512" height="512"/>
+
+    <!-- Textura y material del piso -->
+    <texture name="ground_tex" type="2d" builtin="checker" mark="edge"
+             rgb1="0.8 0.8 0.8" rgb2="0.65 0.65 0.65" markrgb="1 1 1"
+             width="300" height="300"/>
+    <material name="ground_mat" texture="ground_tex" texuniform="true" texrepeat="5 5" reflectance="0"/>
+  </asset>
+
+  <worldbody>
+    <!-- Luz y suelo de referencia (opcional, borra si no lo necesitas) -->
+    
+
+    <!-- Piso -->
+    <geom name="floor" type="plane" size="0 0 0.05" material="ground_mat" rgba="1 1 1 1" pos="0 0 0"/>
+
+    <!-- Base fija desde donde cuelga el péndulo -->
+    <body name="base" pos="0 0 0">
+
+      <!-- Segmento 1: falange proximal -->
+      <body name="link1" pos="0 0 0">
+        <joint name="joint1"/>
+        <geom name="geom1" fromto="0 0 0  0 0 0.1"/>
+
+        <!-- Segmento 2: falange media -->
+        <body name="link2" pos="0 0 0.1">
+          <joint name="joint2"/>
+          <geom name="geom2" fromto="0 0 0  0 0 0.1"/>
+
+          <!-- Segmento 3: falange distal -->
+          <body name="link3" pos="0 0 0.1">
+            <joint name="joint3"/>
+            <geom name="geom3" fromto="0 0 0  0 0 0.1"/>
+
+            <!-- Punta del dedo, para leer su posicion en el mundo -->
+            <site name="tip" pos="0 0 0.1" size="0.008" rgba="0 1 0 1"/>
+          </body>
+
+        </body>
+      </body>
+
+    </body>
+  </worldbody>
+
+  <!-- Actuadores de posicion, uno por joint. Ajusta kp y ctrlrange a gusto -->
+  <actuator>
+    <position name="pos1" joint="joint1" kp="5" ctrlrange="-1.57 1.57"/>
+    <position name="pos2" joint="joint2" kp="5" ctrlrange="-1.57 1.57"/>
+    <position name="pos3" joint="joint3" kp="5" ctrlrange="-1.57 1.57"/>
+  </actuator>
+
+  <!-- Sensores de angulo por joint: el viewer los grafica solo en tiempo real -->
+  <sensor>
+    <jointpos name="sens_joint1" joint="joint1"/>
+    <jointpos name="sens_joint2" joint="joint2"/>
+    <jointpos name="sens_joint3" joint="joint3"/>
+  </sensor>
+
+</mujoco>

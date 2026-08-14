@@ -1,0 +1,14 @@
+name: erp
+channels:
+  - conda-forge
+dependencies:
+  - python=3.10
+  - numpy
+  - scipy
+  - matplotlib
+  - pytest
+  - mypy
+  - ruff
+  - pip
+  - pip:
+      - -e ./software

@@ -1,0 +1,26 @@
+# Ownership is by directory, not by task.
+# Replace the placeholder handles below with real GitHub usernames.
+# See CLAUDE.md and README.md § Team structure for the rationale.
+
+# Owner A — estimation core
+/software/src/erp/estimators/  @owner-A
+/software/src/erp/models/      @owner-A
+
+# Owner B — sensing, firmware, calibration
+/software/src/erp/sensors/     @owner-B
+/firmware/                     @owner-B
+/software/src/erp/calibration/ @owner-B
+
+# Owner C — mechanical & electronics
+/mechanical/    @owner-C
+/electronics/   @owner-C
+
+# Owner D — fusion, I/O, viz, CI
+/software/src/erp/fusion/  @owner-D
+/software/src/erp/io/      @owner-D
+/software/src/erp/viz/     @owner-D
+/.github/                  @owner-D
+
+# The four ABCs are the shared contract (core/types.py, models/base.py,
+# estimators/base.py, sensors/base.py): changes there require approval
+# from every owner, enforced by branch protection, not by this file alone.
