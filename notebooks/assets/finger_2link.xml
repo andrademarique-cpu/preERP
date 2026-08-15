@@ -1,0 +1,140 @@
+<mujoco model="brazo_robotico_3_segmentos">
+  <compiler autolimits="true"/>
+
+  <!-- ESTE ARCHIVO ES UN TEMPLATE, no un XML valido: los campos entre llaves se rellenan desde
+       Python con str.format(**params). Ver notebooks/finger_imu_practice.ipynb.
+
+       Regla: todo numero con significado fisico (geometria, damping, ganancias del
+       servo, torque de stall, armature, timestep) vive en el diccionario de Python,
+       NO aca. El XML solo define la topologia y donde va cada valor.
+
+       Motivo concreto (arquitectura "dual model" para el EKF): necesitamos DOS
+       modelos compilados desde la MISMA fuente, que difieren solo en la dinamica
+       interna del motor:
+
+         model_sim  (planta, nx = 2*nv + na = 6)  con dyntype="filterexact"
+         model_ekf  (filtro,  nx = 2*nv      = 4)  sin activaciones
+
+       Eso se resuelve con el campo motor_dynamics_N: Python lo rellena con los
+       atributos del filtro de 1er orden, o con string vacio. No hace falta un
+       segundo XML ni parsear/borrar atributos con ElementTree.
+
+       Por que hacen falta dos modelos: en el modelo de 6 estados el control u entra
+       SOLO en las activaciones a, asi que si uno recorta la B de 6x2 a 4x2 se queda
+       con una matriz de ceros y el EKF cree que el control no hace nada. -->
+
+  <!-- integrator="implicitfast": necesario para que el termino kv (biasprm[2]) del servo
+       se integre implicitamente. Con el Euler explicito por defecto, ganancias de servo
+       realistas vuelven la sim inestable. -->
+  <option timestep="{timestep}" gravity="{gravity}" integrator="{integrator}"/>
+
+
+  <visual>
+    <headlight diffuse="0.6 0.6 0.6" ambient="0.3 0.3 0.3" specular="0 0 0"/>
+    <rgba haze="0.15 0.25 0.35 1"/>
+    <global azimuth="0" elevation="-20"/>
+  </visual>
+
+  <asset>
+    <texture type="skybox" builtin="gradient" rgb1="0.3 0.5 0.7" rgb2="0 0 0" width="512" height="3072"/>
+    <texture type="2d" name="groundplane" builtin="checker" mark="edge" rgb1="0.2 0.3 0.4" rgb2="0.1 0.2 0.3" markrgb="0.8 0.8 0.8" width="300" height="300"/>
+    <material name="groundplane" texture="groundplane" texuniform="true" texrepeat="5 5" reflectance="0.2"/>
+  </asset>
+
+  <worldbody>
+    <geom name="floor" size="0 0 0.05" type="plane" material="groundplane"/>
+    <light pos="0 0 3" dir="0 0 -1" directional="true"/>
+
+    <camera name="vista_plana" pos="0.2 0 0.045" euler="90 90 0"/>
+
+    <body name="seg0_base" pos="0 0 0">
+      <geom type="capsule" fromto="0 0 0 0 0 {l0}" size="{w0}" rgba="0.5 0.5 0.5 1" />
+
+      <body name="seg1" pos="0 0 {l0}">
+        <joint name="joint_1" type="hinge" axis="1 0 0" range="{joint_1_range_deg}" damping="{b}" stiffness="0"/>
+        <geom type="capsule" fromto="0 0 0 0 0 {l1}" size="{w1}" rgba="0.2 0.2 0.8 1" />
+        <site name="i1" pos="0 0 {i1}"/>
+        <site name="punta_seg1" pos="0 0 {l1}"/>
+
+        <body name="seg2" pos="0 0 {l1}">
+          <joint name="joint_2" type="hinge" axis="1 0 0" range="{joint_2_range_deg}" damping="{b}"/>
+          <geom type="capsule" fromto="0 0 0 0 0 {l2}" size="{w2}" rgba="0.8 0.2 0.2 1" />
+          <site name="i2" pos="0 0 {i2}"/>
+          <site name="punto_c" pos="0 0 {l2}"/>
+        </body>
+      </body>
+    </body>
+
+  </worldbody>
+
+  <!-- Actuadores: servo de posicion con dinamica de motor realista.
+       ctrl = angulo objetivo en rad (NO torque). El lazo PD vive aca adentro, no en Python.
+
+       Como se arma un servo de posicion con <general>:
+         scalar_force = gain_term * act + bias_term
+         gaintype="fixed"  gainprm="kp 0 0"      -> gain_term = kp
+         biastype="affine" biasprm="0 -kp -kv"   -> bias_term = -kp*length - kv*velocity
+         => force = kp*(act - angulo) - kv*velocidad      (PD clasico)
+       gainprm/biasprm se arman en Python a partir de kp y kv (un solo lugar para
+       cada ganancia; asi no se puede desincronizar el kp de gainprm del de biasprm).
+
+       Que hace realista a este actuador (vs. el <general> pelado):
+         motor_dynamics_N                    campo que Python rellena con
+                                             dyntype="filterexact" dynprm="tau"
+                                             actearly="true" actrange="..."
+                                             (planta) o con "" (modelo del EKF).
+                                             tau = ancho de banda finito del motor: el
+                                             setpoint no salta, pasa por un lag de 1er
+                                             orden. "exact" = integracion exacta del
+                                             filtro, mas estable que "filter".
+                                             actearly usa el act del proximo paso al
+                                             calcular fuerza: saca un timestep de
+                                             retardo control->aceleracion.
+                                             actrange = limites del estado interno.
+         forcerange                          torque de stall del motor. El servo satura como
+                                             un motor real en vez de dar torque infinito.
+         armature                            inercia del rotor reflejada por la reductora
+                                             (escala con gear^2). En un servo con reduccion
+                                             alta esto DOMINA sobre la inercia del eslabon.
+         damping                             friccion viscosa de la caja reductora. Se SUMA
+                                             al damping="{b}" del joint (estructural).
+         ctrlrange                           limite de recorrido del setpoint, igual al
+                                             range del joint (convertido a rad en Python).
+         gear="1"                            ctrl queda en radianes de joint. La reductora se
+                                             modela via armature + forcerange, no via gear.
+
+       Latencia de actuacion (MuJoCo reciente): descomentar para modelar retardo de bus/driver.
+       Requiere nsample > 0 y delay = nsample * timestep.
+           nsample="2" delay="0.004" interp="zoh"
+  -->
+  <actuator>
+    <!-- Proximal: motor mas grande, mueve toda la cadena distal. -->
+    <general name="act_joint_1" joint="joint_1"
+             gear="1" ctrlrange="{act_joint_1_ctrlrange}"
+             forcerange="{act_joint_1_forcerange}"
+             armature="{act_joint_1_armature}" damping="{act_joint_1_damping}"
+             {motor_dynamics_1}
+             gaintype="fixed"  gainprm="{act_joint_1_gainprm}"
+             biastype="affine" biasprm="{act_joint_1_biasprm}"/>
+
+    <!-- Distal: motor mas chico, carga mucho menor -> kp y torque de stall menores. -->
+    <general name="act_joint_2" joint="joint_2"
+             gear="1" ctrlrange="{act_joint_2_ctrlrange}"
+             forcerange="{act_joint_2_forcerange}"
+             armature="{act_joint_2_armature}" damping="{act_joint_2_damping}"
+             {motor_dynamics_2}
+             gaintype="fixed"  gainprm="{act_joint_2_gainprm}"
+             biastype="affine" biasprm="{act_joint_2_biasprm}"/>
+  </actuator>
+
+  <sensor>
+    <framepos name="pos_punta_seg1" objtype="site" objname="punta_seg1"/>
+    <accelerometer name="acc_i1" site="i1"/>
+    <gyro name="gyro1" site="i1"/>
+
+    <framepos name="pos_c" objtype="site" objname="punto_c"/>
+    <accelerometer name="acc_i2" site="i2"/>
+    <gyro name="gyro2" site="i2"/>
+  </sensor>
+
+</mujoco>

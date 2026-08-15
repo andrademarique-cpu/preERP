@@ -1,8 +1,35 @@
 # CLAUDE.md
 
-Guidance for Claude Code when working in this repository. See
-[`README.md`](./README.md) for full project context; this file is the
-condensed set of rules that must hold for any change to be acceptable.
+This file provides guidance to Claude Code (claude.ai/code) when working
+with code in this repository. See [`README.md`](./README.md) for full
+project context; this file is the condensed set of rules that must hold
+for any change to be acceptable.
+
+## Commands
+
+```bash
+# Setup (either path)
+git lfs install
+pip install -e "./software[dev]"        # pip
+conda env create -f environment.yml     # or conda
+
+# Full local check, mirrors .github/workflows/ci.yml
+ruff check software/src software/tests  # lint
+mypy software/src                       # strict type check
+pytest -q                               # tests, incl. NEES/NIS consistency checks
+
+# Single test
+pytest software/tests/test_smoke.py -q
+pytest software/tests/test_smoke.py::test_smoke -q
+
+# Import-direction check (what CI enforces; run manually to verify before pushing)
+grep -rEl "^\s*(from|import)\s+erp\.(sensors)" software/src/erp/estimators software/src/erp/models
+# any match here is a violation — the command should print nothing
+```
+
+The package lives at `software/`, not repo root (`pyproject.toml` points
+`packages.find` at `software/src`, `testpaths` at `software/tests`) — run
+the above from the repo root, not from inside `software/`.
 
 ## What this project is
 

@@ -62,9 +62,9 @@
 
   <!-- Actuadores de posicion, uno por joint. Ajusta kp y ctrlrange a gusto -->
   <actuator>
-    <position name="pos1" joint="joint1" kp="5" ctrlrange="-1.57 1.57"/>
-    <position name="pos2" joint="joint2" kp="5" ctrlrange="-1.57 1.57"/>
-    <position name="pos3" joint="joint3" kp="5" ctrlrange="-1.57 1.57"/>
+    <position name="pos1" joint="joint1" kp="30" ctrlrange="-1.57 1.57"/>
+    <position name="pos2" joint="joint2" kp="30" ctrlrange="-1.57 1.57"/>
+    <position name="pos3" joint="joint3" kp="30" ctrlrange="-1.57 1.57"/>
   </actuator>
 
   <!-- Sensores de angulo por joint: el viewer los grafica solo en tiempo real -->
