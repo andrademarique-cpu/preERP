@@ -35,6 +35,13 @@ python_version = "3.10"
 strict = true
 mypy_path = "software/src"
 
+# scipy ships no type stubs; erp only uses scipy.linalg.expm, and every call
+# site wraps the result in np.asarray(..., dtype=np.float64) so the untyped
+# boundary does not leak Any into the estimation core.
+[[tool.mypy.overrides]]
+module = "scipy.*"
+ignore_missing_imports = true
+
 [tool.ruff]
 line-length = 100
 src = ["software/src"]

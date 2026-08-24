@@ -1,0 +1,98 @@
+# Estimation stack configuration.
+#
+# Every estimator and model must be registered here rather than instantiated
+# ad hoc in code (CLAUDE.md, "Conventions"). This is the first such file, so it
+# also sets the precedent for the ones that follow.
+#
+# Units are stated on every physical quantity. Silent unit and frame mismatches
+# are the main correctness risk in a sensor fusion codebase, so the unit is
+# part of the key's meaning, not a comment for humans only.
+
+time:
+  # Single monotonic host time base shared by every sensor and input.
+  # Converting a device clock into it is a Sensor responsibility.
+  base: monotonic_host
+  # Seconds the FusionEngine holds measurements before processing, absorbing
+  # transport latency and cross-sensor reordering. The estimate trails real
+  # time by roughly this much. Must exceed the worst sensor latency below.
+  buffer_horizon_s: 0.050
+
+inputs:
+  # Reference/setpoint generation rate. Independent of both the actuator
+  # command rate and every sensor rate; the fusion layer reconciles them.
+  rate_hz: 200
+  # Commanded inputs are piecewise constant between updates. This is what the
+  # hardware does, not an approximation of it.
+  hold: zoh
+  # Seconds between latching a command and it reaching the plant (bus/driver
+  # transport). Applied by InputHistory. NOT the same thing as the servo time
+  # constant below, and not the same thing as sensor latency.
+  # TODO: unmeasured on the real chain; see ADR-0001 section 7.
+  actuation_delay_s: 0.0
+
+# Servoed joints, proximal to distal. Mirrors notebooks/assets/finger_2link.xml,
+# whose physical values live in the notebook's `actuators` dict.
+joints:
+  - name: joint_1
+    kp: 2.0            # N*m/rad, servo proportional gain
+    kv: 0.025          # N*m*s/rad, servo velocity gain
+    damping: 0.003     # N*m*s/rad, structural (0.002) + gearbox (1e-3), summed
+    inertia: 4.0e-5    # kg*m^2, reflected rotor inertia dominates the link here
+    tau: 0.004         # s, servo activation time constant
+    psd_alpha: 1.0e-2  # rad^2/s^3, angular-acceleration disturbance PSD
+    psd_act: 1.0e-8    # rad^2/s, servo activation jitter PSD
+  - name: joint_2
+    kp: 0.8
+    kv: 0.010
+    damping: 0.0028    # structural (0.002) + gearbox (8e-4)
+    inertia: 2.0e-5
+    tau: 0.004
+    psd_alpha: 1.0e-2
+    psd_act: 1.0e-8
+
+# psd_alpha is a continuous-time power spectral density in rad^2/s^3. It is NOT
+# the notebook's SIG_ALPHA = 12.0 rad/s^2, which is a per-step DWNA sigma valid
+# only at a fixed 2 ms tick. Converting between them is a re-derivation, not a
+# unit change; the values above are placeholders pending that work.
+# See ADR-0001 sections 2.1 and 3 (D3).
+
+sensors:
+  imu_proximal:
+    model: joint_accel_model    # erp.models.measurement
+    rate_hz: 1000
+    latency_s: 0.001            # sample instant to host arrival
+    sigma: 0.05                 # m/s^2, per channel
+    frame_id: i1
+  imu_distal:
+    model: joint_accel_model
+    rate_hz: 1000
+    latency_s: 0.001
+    sigma: 0.05
+    frame_id: i2
+  gyro_proximal:
+    model: joint_block_model
+    block: rate
+    rate_hz: 1000
+    latency_s: 0.001
+    sigma: 0.005                # rad/s, per channel
+    frame_id: i1
+  encoders:
+    model: joint_block_model
+    block: angle
+    rate_hz: 100
+    latency_s: 0.005
+    sigma: 0.0017               # rad, per channel (~0.1 deg)
+    frame_id: joint
+
+estimators:
+  finger_ekf:
+    type: ExtendedKalmanFilter   # erp.estimators.ekf
+    process_model: servoed_finger_model
+    # State is [q, v, a] in blocks: angle (rad), rate (rad/s), servo
+    # activation (rad). The activation block is not optional -- dropping it
+    # biases every accelerometer channel in a way no Q or R tuning repairs.
+    # See ADR-0001 section 2.3.
+    initial_covariance:
+      angle: 1.0e-4       # rad^2
+      rate: 1.0e-2        # (rad/s)^2
+      activation: 1.0e-4  # rad^2
