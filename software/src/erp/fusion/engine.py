@@ -10,7 +10,7 @@ See ``docs/adr/0001-multi-rate-fusion.md``.
 from __future__ import annotations
 
 from collections import Counter
-from typing import Mapping
+from collections.abc import Mapping
 
 from erp.core.timeline import InputHistory
 from erp.core.types import GaussianState, Measurement

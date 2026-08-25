@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import numpy as np
 
-from erp.core.linalg import make_spd, mahalanobis
+from erp.core.linalg import mahalanobis, make_spd
 from erp.core.types import Array, GaussianState, Measurement
 from erp.estimators.base import StateEstimator
 from erp.models.base import MeasurementModel, ProcessModel

@@ -9,15 +9,26 @@ on:
 jobs:
   test:
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        # 3.10 is the floor declared by `requires-python` and targeted by mypy
+        # and ruff; 3.11 is what the dev conda environment runs. Testing both is
+        # what makes the declared support range true rather than aspirational.
+        python-version: ["3.10", "3.11"]
     steps:
       - uses: actions/checkout@v4
 
       - uses: actions/setup-python@v5
         with:
-          python-version: "3.10"
+          python-version: ${{ matrix.python-version }}
 
+      # From the repo root, with the "." -- the only packaging file is here and
+      # already points setuptools at software/src. `-e "./software[dev]"` was
+      # installable-looking but impossible, and it failed the job before any
+      # check below ever ran.
       - name: Install package
-        run: pip install -e "./software[dev]"
+        run: pip install -e ".[dev]"
 
       - name: Lint
         run: ruff check software/src software/tests

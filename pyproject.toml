@@ -15,15 +15,35 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
+# Floors, not pins: these are the versions the documented checks are verified
+# against. ruff especially -- its *default* rule set grew from 59 rules in 0.12
+# to 413 in 0.16, so an unfloored ruff made "does this tree lint clean?" a
+# question about the developer's machine. [tool.ruff.lint] select below now
+# fixes the rule set explicitly; the floor keeps the two consistent.
 dev = [
-    "pytest",
-    "mypy",
-    "ruff",
+    "pytest>=8",
+    "mypy>=1.17",
+    "ruff>=0.16",
 ]
 viz = [
     "matplotlib",
 ]
+# Dependencies of the applications under scripts/ (the live finger viewer),
+# not of the erp package itself -- the estimation core stays importable with
+# only numpy/scipy. mujoco is floored at 3.11 because mj_fullM changed
+# signature there (it now takes MjData and writes into dst); see
+# scripts/finger_viewer.py:joint_params_from_plant.
+app = [
+    "mujoco>=3.11",
+    "pyqtgraph",
+    "PyQt5",
+    "pyserial",
+]
 
+# This is the ONLY packaging file in the repo, and it already points setuptools
+# at the nested sources. The project root is therefore the REPO root; only the
+# sources live under software/. Install with `pip install -e ".[dev]"` from here
+# -- `pip install -e "./software[dev]"` cannot work, there is no build file there.
 [tool.setuptools.packages.find]
 where = ["software/src"]
 
@@ -45,3 +65,20 @@ ignore_missing_imports = true
 [tool.ruff]
 line-length = 100
 src = ["software/src"]
+# Sources must stay importable on the floor version, which is what CI runs and
+# what [tool.mypy] python_version targets -- even though the dev conda env is
+# newer. Without this, ruff's UP rules would rewrite to whatever the *local*
+# interpreter supports.
+target-version = "py310"
+
+[tool.ruff.lint]
+# Selected explicitly rather than left to ruff's default. The default set is not
+# stable across ruff releases (see the dev-extra comment above), so leaving it
+# implicit meant the lint result depended on which ruff happened to be resolved.
+# This list is the project's policy and changes only when we change it.
+#   E,F  pycodestyle + pyflakes -- the classic baseline
+#   I    import sorting, so import blocks stop drifting between authors
+#   UP   pyupgrade, held to target-version
+#   B    bugbear -- mutable defaults and friends
+#   RUF  ruff's own checks, incl. sorted __all__
+select = ["E", "F", "I", "UP", "B", "RUF"]

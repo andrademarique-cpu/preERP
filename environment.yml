@@ -1,14 +1,35 @@
+# Conda path for creating the `erp` development environment.
+#
+#     conda env create -f environment.yml     # from the REPO ROOT
+#     conda activate erp
+#
+# Conda supplies the interpreter and pip; every actual dependency is declared
+# once, in pyproject.toml. Listing numpy/scipy/matplotlib/pytest/mypy/ruff here
+# as well was a second source of truth that drifted from the first -- the two
+# disagreed about which tools an environment should even contain.
+#
+# Mixing conda and pip is the usual way conda environments break. Keeping the
+# split at "conda owns the interpreter, pip owns the packages" avoids that:
+# nothing is resolved twice by two solvers.
 name: erp
 channels:
   - conda-forge
 dependencies:
-  - python=3.10
-  - numpy
-  - scipy
-  - matplotlib
-  - pytest
-  - mypy
-  - ruff
+  # 3.11 is what the working dev environment runs. The supported floor is 3.10
+  # (`requires-python`, `[tool.mypy] python_version`, and the CI matrix), so
+  # code must stay 3.10-compatible even though this environment is newer.
+  - python=3.11
   - pip
   - pip:
-      - -e ./software
+      # The project root is the REPO root, not software/: the single packaging
+      # file lives there and already points setuptools at software/src. There
+      # is no pyproject.toml under software/, so "-e ./software" cannot work.
+      #
+      # dev = pytest/mypy/ruff, viz = matplotlib. The viewer under scripts/
+      # needs mujoco, pyqtgraph, PyQt5 and pyserial, which are deliberately
+      # NOT installed here -- the estimation core and its tests need none of
+      # them. Add them only if you intend to run the app:
+      #
+      #     pip install -e ".[app]"
+      #
+      - "-e .[dev,viz]"

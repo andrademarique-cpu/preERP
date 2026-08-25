@@ -189,8 +189,10 @@ def joint_params_from_plant(model: mj.MjModel, data: mj.MjData,
     but reflected rotor inertia (4e-5) dominates the inter-link coupling
     (~3e-6) by an order of magnitude here.
     """
+    # MuJoCo >= 3.11 takes the MjData itself and writes into ``dst``; the older
+    # form passed the sparse ``data.qM`` as the third argument instead.
     M = np.zeros((model.nv, model.nv))
-    mj.mj_fullM(model, M, data.qM)
+    mj.mj_fullM(model, data, M)
     out = []
     for i, act in enumerate(ACTUATORS.values()):
         out.append(JointParams(

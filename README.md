@@ -71,8 +71,8 @@ import-direction check in CI.
 .
 ├── README.md
 ├── CLAUDE.md
-├── pyproject.toml            # installable: pip install -e ./software
-├── environment.yml
+├── pyproject.toml            # the only packaging file; install from HERE
+├── environment.yml           # conda path; delegates deps to pyproject.toml
 ├── .gitattributes            # Git LFS: CAD, STEP, STL, datasets
 ├── CODEOWNERS
 ├── .github/workflows/ci.yml
@@ -119,6 +119,13 @@ import-direction check in CI.
 
 Four abstract base classes define the entire contract. Everything else
 derives from them.
+
+> **The signatures below are the pre-freeze sketch and are out of date.**
+> [ADR-0001](./docs/adr/0001-multi-rate-fusion.md) D1 amended all four
+> before the freeze: `Q` became `Q(dt)`, `h`/`jacobian` take `u`,
+> `update` takes `u`, and `Sensor` gained `drain()` with a non-blocking
+> `read() -> Measurement | None`. Read the source files for the current
+> contract; each change has a measured justification in ADR-0001 § 2.
 
 ```python
 # core/types.py
@@ -291,20 +298,81 @@ assumed — one force-push to `main` costs more than these sessions save.
 ## 9. Immediate next steps
 
 - [x] Initialize the repository with `.gitattributes` and LFS first.
-- [ ] Run Sprint 0 to freeze the four ABCs plus stubs.
-- [x] Stand up CI: pytest, type checking, import-direction check.
+- [x] Run Sprint 0 to freeze the four ABCs plus stubs. Signatures were
+      amended first by [ADR-0001](./docs/adr/0001-multi-rate-fusion.md)
+      D1; they are frozen as of that ADR.
+- [x] Stand up CI: pytest, type checking, import-direction check. The
+      install step was broken from the start (`-e ./software`), so the
+      job failed before reaching any check — fixed, and now runs on a
+      3.10/3.11 matrix.
+- [x] Establish the simulated ground-truth scenario used to validate
+      every estimator — `software/tests/test_consistency.py`, multi-rate
+      NEES/NIS with falsification variants that must fail.
 - [ ] Assign module ownership and commit real handles to `CODEOWNERS`
       (currently placeholders).
-- [ ] Establish the simulated ground-truth scenario used to validate
-      every estimator.
+- [ ] Re-derive `psd_alpha` from the physics. The value in
+      `config/estimation.yaml` is a placeholder, and it blocks these
+      filters meaning anything on real data.
+- [ ] Measure the actuation transport delay `d_act` on the real chain.
+- [ ] Implement the UKF and the first real sensor drivers;
+      `calibration/`, `io/` and `ros2_ws/` are still empty.
 
 ## Getting started
 
+**Install from the repository root.** `pyproject.toml` lives here and
+already points setuptools at `software/src`; there is no build file under
+`software/`, so the `-e ./software` form that appeared in earlier
+revisions of this file could never work.
+
 ```bash
 git lfs install
-pip install -e "./software[dev]"
+
+# pip
+pip install -e ".[dev]"          # core + pytest/mypy/ruff
+conda activate erp               # or: conda env create -f environment.yml && conda activate erp
+
+pytest -q                        # 63 tests, ~7 s
+```
+
+### Extras
+
+Dependencies are declared once, in `pyproject.toml`. `environment.yml`
+only supplies the interpreter and pip, then installs this package — so
+there is no second list to keep in sync.
+
+| Extra | Pulls in | You need it for |
+|---|---|---|
+| *(none)* | numpy, scipy | importing `erp`, running estimators |
+| `dev` | pytest, mypy, ruff | the checks below |
+| `viz` | matplotlib | plotting in notebooks |
+| `app` | mujoco, pyqtgraph, PyQt5, pyserial | `scripts/finger_viewer.py` only |
+
+`conda env create` installs `[dev,viz]`. The `app` stack is deliberately
+left out — the estimation core and its tests need none of it, and that is
+the point of § 3. Add it only if you intend to run the viewer:
+
+```bash
+pip install -e ".[app]"
+python scripts/finger_viewer.py            # synthetic input, no hardware
+python scripts/finger_viewer.py --pot --port COM5   # real potentiometers
+```
+
+### Checks
+
+These are exactly what CI runs, in order:
+
+```bash
+ruff check software/src software/tests
+mypy software/src
 pytest -q
 ```
 
+Python 3.10 is the supported floor — what `requires-python`, mypy and
+ruff all target, and what CI tests alongside 3.11. The conda environment
+is 3.11, so it will happily run 3.11-only syntax that CI then rejects;
+mypy catches this locally.
+
 See [`CLAUDE.md`](./CLAUDE.md) for the conventions an AI coding assistant
-(or a new contributor) should follow when working in this repository.
+(or a new contributor) should follow when working in this repository, and
+[`docs/adr/0001-multi-rate-fusion.md`](./docs/adr/0001-multi-rate-fusion.md)
+for the design decisions the package is built on.

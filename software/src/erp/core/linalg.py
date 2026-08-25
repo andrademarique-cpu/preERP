@@ -9,7 +9,7 @@ import numpy as np
 
 from erp.core.types import Array
 
-__all__ = ["make_spd", "mahalanobis", "nees", "nis"]
+__all__ = ["mahalanobis", "make_spd", "nees", "nis"]
 
 
 def make_spd(P: Array, rel: float = 1e-12) -> Array:

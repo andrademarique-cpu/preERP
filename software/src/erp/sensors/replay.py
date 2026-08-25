@@ -6,7 +6,8 @@ code path as the robot: the fusion engine cannot tell it from a driver.
 
 from __future__ import annotations
 
-from typing import Sequence
+from collections.abc import Sequence
+from itertools import pairwise
 
 import numpy as np
 
@@ -48,7 +49,7 @@ class ReplaySensor(Sensor):
             Measurement model for this sensor.
         """
         ts = [m.timestamp for m in measurements]
-        if any(b < a for a, b in zip(ts, ts[1:])):
+        if any(b < a for a, b in pairwise(ts)):
             raise ValueError("replay measurements must be non-decreasing in timestamp")
         self._measurements = list(measurements)
         self._model = model

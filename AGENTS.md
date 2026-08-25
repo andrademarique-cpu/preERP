@@ -31,19 +31,25 @@ Key rules for any automated change
 
 Quick developer commands
 ------------------------
+Run these from the REPO ROOT, in the `erp` environment. The `.` is not a
+typo: the only packaging file is at the root and already points
+setuptools at `software/src`. `-e "./software[dev]"` cannot work.
+
 ```bash
 git lfs install
-pip install -e "./software[dev]"
+pip install -e ".[dev]"                 # add [app] for scripts/, [viz] for matplotlib
+ruff check software/src software/tests  # `ruff check .` is not what CI runs
+mypy software/src                       # bare `mypy` has no target configured
 pytest -q
-ruff check .
-mypy
 ```
 
 CI and checks (what an agent must preserve)
 -----------------------------------------
 - `pytest` — unit and NEES/NIS consistency tests
 - `mypy` — strict typing; `mypy_path` configured in `pyproject.toml`
-- linting (`ruff`) and formatting rules
+- `ruff` — rule set is pinned via `[tool.ruff.lint] select`, so results
+  do not drift with the installed ruff version. Do not widen or narrow
+  that list to make a lint failure go away.
 - import-direction check in CI that forbids core→hardware imports
 
 What to do when unsure

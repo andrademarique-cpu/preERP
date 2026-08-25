@@ -76,7 +76,7 @@ def test_querying_at_a_returned_breakpoint_gets_the_new_input(delay: float) -> N
     h = history([0.0, 0.1, 0.2], delay=delay)
     breaks = h.breakpoints_in(0.0 + delay, 1.0)
     assert len(breaks) == 2
-    for bp, expected in zip(breaks, (1.0, 2.0)):
+    for bp, expected in zip(breaks, (1.0, 2.0), strict=True):
         assert h.u_at(bp) == pytest.approx(expected)
 
 
