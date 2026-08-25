@@ -60,7 +60,6 @@ import os
 import queue
 import sys
 import time
-import xml.etree.ElementTree as ET
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -118,38 +117,6 @@ UI_PERIOD_MS = 33
 COLOR_U, COLOR_TRUE, COLOR_EST = "#888888", "#4c8fd8", "#e08a3c"
 
 
-def relocate_actuator_inertia(xml: str) -> str:
-    """Move ``armature``/``damping`` from ``<general>`` onto the driven ``<joint>``.
-
-    MuJoCo 3.4 does not accept either attribute on an actuator -- it rejects the
-    template in ``notebooks/assets/finger_2link.xml`` outright. Rather than edit
-    that asset (the notebook builds its ``fields`` dict around the current
-    layout), the equivalent model is produced here at load time.
-
-    The transformation is physics-preserving *because the template uses
-    ``gear="1"``*: with unity gear the actuator's reflected rotor inertia is
-    exactly a joint armature, and gearbox friction simply adds to the joint's
-    structural damping, which is what the template's own comments already say
-    it does.
-    """
-    root = ET.fromstring(xml)
-    joints = {j.get("name"): j for j in root.iter("joint")}
-    for act in root.iter("general"):
-        target = joints.get(act.get("joint", ""))
-        if target is None:
-            continue
-        if act.get("gear", "1") != "1":
-            raise ValueError("relocation assumes gear=1; reflected inertia would rescale")
-        armature = act.attrib.pop("armature", None)
-        damping = act.attrib.pop("damping", None)
-        if armature is not None:
-            target.set("armature", armature)
-        if damping is not None:
-            total = float(target.get("damping", "0")) + float(damping)
-            target.set("damping", repr(total))
-    return ET.tostring(root, encoding="unicode")
-
-
 def build_xml(template: str, *, motor_lag: bool, gravity: str,
               timestep: float, actearly: bool) -> str:
     """Fill the MuJoCo template. ``motor_lag`` adds the servo activation state.
@@ -175,7 +142,7 @@ def build_xml(template: str, *, motor_lag: bool, gravity: str,
             f'actearly="{str(actearly).lower()}" actrange="{lo:.6f} {hi:.6f}"'
             if motor_lag else ""
         )
-    return relocate_actuator_inertia(template.format(**fields))
+    return template.format(**fields)
 
 
 def joint_params_from_plant(model: mj.MjModel, data: mj.MjData,
@@ -188,6 +155,11 @@ def joint_params_from_plant(model: mj.MjModel, data: mj.MjData,
     linear model treats the joints as decoupled, which is a real approximation,
     but reflected rotor inertia (4e-5) dominates the inter-link coupling
     (~3e-6) by an order of magnitude here.
+
+    That rotor inertia is declared on the ``<general>`` actuator, not on the
+    joint, so ``dof_armature`` reads zero -- but MuJoCo folds actuator armature
+    (through ``gear^2``) into the mass matrix, which is why ``M`` is the right
+    place to read it from and ``dof_armature`` is not.
     """
     # MuJoCo >= 3.11 takes the MjData itself and writes into ``dst``; the older
     # form passed the sparse ``data.qM`` as the third argument instead.
