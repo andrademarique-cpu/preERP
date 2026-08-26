@@ -6,6 +6,8 @@ same checks run against every model registered below.
 
 from __future__ import annotations
 
+from dataclasses import replace
+
 import numpy as np
 import pytest
 
@@ -20,15 +22,29 @@ JOINTS = [
 ]
 
 
+# Same finger, but psd_act now has to cover the whole unknown actuation rather
+# than jitter around a known setpoint, so it is orders of magnitude larger.
+BLIND_JOINTS = [replace(jp, psd_act=1e-3) for jp in JOINTS]
+
+
 def finger() -> ProcessModel:
     return servoed_finger_model(JOINTS)
+
+
+def blind_finger() -> ProcessModel:
+    """The same finger with the servo command withheld from the estimator."""
+    return servoed_finger_model(BLIND_JOINTS, known_input=False)
 
 
 def double_integrator() -> ProcessModel:
     return ConstantAccelModel(n_axes=2, psd=0.5)
 
 
-MODELS = {"servoed_finger": (finger, 6, 2), "constant_accel": (double_integrator, 4, 1)}
+MODELS = {
+    "servoed_finger": (finger, 6, 2),
+    "blind_finger": (blind_finger, 6, 2),
+    "constant_accel": (double_integrator, 4, 1),
+}
 
 
 @pytest.fixture(params=sorted(MODELS))
@@ -143,6 +159,78 @@ def test_servo_activation_block_matches_the_exact_lag() -> None:
         got = model.predict(x0, u, dt)[2 * n :]
         want = u + (x0[2 * n :] - u) * np.exp(-dt / tau)
         assert np.allclose(got, want, rtol=1e-10, atol=1e-14)
+
+
+def test_blind_model_ignores_the_input_entirely() -> None:
+    """The point of the mode: u must have no path into the prediction.
+
+    This is the test that fails if B_c ever stops being zero. Asserted bitwise,
+    not approximately -- a model that "mostly" ignores the command is a model
+    that still has a command path.
+    """
+    model = blind_finger()
+    rng = np.random.default_rng(3)
+    x0 = rng.normal(size=6)
+
+    baseline = model.predict(x0, np.zeros(2), 4e-3)
+    for u in (np.array([1.0, 0.5]), np.array([-30.0, 900.0]), rng.normal(size=2) * 1e3):
+        assert np.array_equal(model.predict(x0, u, 4e-3), baseline)
+        assert np.array_equal(model.jacobian(x0, u, 4e-3), model.jacobian(x0, np.zeros(2), 4e-3))
+
+    # And the input-driven model must NOT pass this -- otherwise the check above
+    # proves nothing about the flag.
+    driven = finger()
+    assert not np.allclose(
+        driven.predict(x0, np.array([1.0, 0.5]), 4e-3),
+        driven.predict(x0, np.zeros(2), 4e-3),
+    )
+
+
+def test_blind_activation_is_a_random_walk_not_a_decaying_lag() -> None:
+    """A random walk holds its value; the un-driven lag would decay to zero.
+
+    Zeroing B_c alone would leave A_c[ia, ia] = -1/tau in place, and at
+    tau = 4 ms the activation keeps only ~0.368 of its value per 4 ms step --
+    so the filter would drag the estimated actuation toward zero and fight
+    every measurement. Both entries have to go.
+    """
+    n, dt = 2, 4e-3
+    blind, driven = blind_finger(), finger()
+    x = np.zeros(3 * n)
+
+    F_blind = blind.jacobian(x, np.zeros(n), dt)
+    F_driven = driven.jacobian(x, np.zeros(n), dt)
+    for i in range(n):
+        ia = 2 * n + i
+        assert F_blind[ia, ia] == pytest.approx(1.0, abs=1e-15)
+        assert F_driven[ia, ia] == pytest.approx(np.exp(-dt / JOINTS[i].tau), rel=1e-12)
+
+    # Brownian variance accumulates as psd_act * dt, exactly: with A_c row `ia`
+    # identically zero, that row of exp(A_c s) stays e_ia, so the integral
+    # collapses to (G q G^T)[ia, ia] * dt with no coupling from the other blocks.
+    #
+    # Checked only over realistic prediction gaps, which the slowest sensor
+    # (100 Hz encoders) bounds at ~10 ms. At 50 ms this drifts to ~6e-5
+    # relative -- not a modelling error but expm round-off, since ||A_c dt||
+    # reaches 2500 there. Same stiffness limit documented in
+    # test_schedule_invariance and ADR-0001 section 7.
+    for step in (1e-4, dt, 1e-2):
+        Q = blind.Q(step)
+        for i in range(n):
+            ia = 2 * n + i
+            assert Q[ia, ia] == pytest.approx(BLIND_JOINTS[i].psd_act * step, rel=1e-9)
+
+
+def test_blind_model_requires_positive_activation_noise() -> None:
+    """A frozen activation the filter believes exactly is the failure to prevent."""
+    for bad_psd in (0.0, -1e-6):
+        joints = [replace(jp, psd_act=bad_psd) for jp in JOINTS]
+        with pytest.raises(ValueError, match="psd_act must be > 0"):
+            servoed_finger_model(joints, known_input=False)
+
+    # The same parameters are fine when the command IS available, because then
+    # psd_act only models jitter around a setpoint the filter already knows.
+    servoed_finger_model([replace(JOINTS[0], psd_act=0.0)])
 
 
 def test_rejects_degenerate_joint_parameters() -> None:

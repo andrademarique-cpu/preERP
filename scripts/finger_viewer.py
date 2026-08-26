@@ -18,35 +18,89 @@ The gap between U and Q true is the servo's own lag and droop. The gap between
 Q true and Q est is what the estimator costs you. They are different failures
 and the plots keep them apart.
 
-Expect the filter to TRACK well and to be OVERCONFIDENT
--------------------------------------------------------
-Position tracking is good -- of order 0.1 deg on a 60 deg sweep -- but the
-+/-2 sigma coverage runs near 10 %, not 95 %. That is not a bug in the plumbing,
-and it is worth understanding before trusting the ellipse:
+Reading the numbers: NEES, not the trajectory
+---------------------------------------------
+The status bar reports median NEES against the full 6-state MuJoCo truth
+(``qpos``, ``qvel``, ``act``), target 6. That is the diagnostic to trust. A
+trajectory that looks right and a badly inconsistent filter are the same
+picture, which is why coverage and NEES are on screen at all.
 
-``erp``'s ``servoed_finger_model`` integrates the coupled ``(q, v, a)`` system
-exactly, so over a step it effectively uses the *average* servo activation.
-MuJoCo evaluates actuator force at a step endpoint instead -- the start, or with
-``actearly="true"`` the end. The difference is ``kp * delta_act / inertia``,
-about 26 rad/s^2 here, and it is **deterministic and time-correlated**, not
-white.
+**Most of the apparent inconsistency used to be a bug in the diagnostic, not in
+the filter.** The belief is valid at ``engine.time``, which trails the plant by
+the buffer horizon plus the gap to the last processed event. Scoring it against
+truth sampled at ``sim_time`` compared two different instants, and at these
+joint rates that mismatch alone exceeds the 2-sigma band it is judged against.
+Measured over a 10 s sweep: median NEES **1145 before** the belief was
+extrapolated to ``sim_time``, **20.3 after** -- a factor of 56, none of it
+physics. With ``--buffer-horizon 0.010`` the old number reached 22587 while the
+aligned one stayed at 19.8, i.e. it was measuring lag and nothing else. See
+``FusionEngine.belief_at``.
 
-So process noise cannot absorb it. Measured: shrinking the plant timestep from
-2 ms to 0.25 ms cuts the one-step residual tenfold and moves coverage from 0.09
-to 0.09. Raising ``--psd-alpha`` to ~400 does force coverage to 0.97, but that
-is whitening a bias -- exactly the mistake ``docs/theory/finger_imu_ekf.md``
-section 4 documents, where inflating the noise flattens NIS while leaving NEES
-untouched.
+What remains is real, and smaller than previously believed: 20.3 against a
+target of 6, so the filter is still roughly 3x overconfident. Contributors,
+measured by turning them off:
 
-The real fixes are the ones that report lists: match the model to the plant's
-convention, or augment the state. Until then the status bar reports live
-coverage so the inconsistency stays visible rather than implied.
+* **Unmodelled gravity** -- ``servoed_finger_model`` has no gravity term at all.
+  ``--no-gravity`` takes NEES from 20.3 to 13.7.
+* **Actuator-force convention.** ``erp`` integrates the coupled ``(q, v, a)``
+  system exactly, so over a step it uses the *average* servo activation; MuJoCo
+  evaluates actuator force at a step endpoint. The difference is
+  ``kp * delta_act / inertia``, about 26 rad/s^2, and it is deterministic and
+  time-correlated, not white -- so process noise cannot absorb it.
+  ``--no-actearly`` halves it; ``--plant-dt 0.00025`` cuts the one-step residual
+  tenfold and barely moves coverage, which is what tells you it is a bias.
+* **Decoupled joints** -- only ``diag(M)`` is taken; see
+  ``joint_params_from_plant``.
+
+Raising ``--psd-alpha`` to ~400 does force coverage to 0.97, but that is
+whitening a bias -- the mistake ``docs/theory/finger_imu_ekf.md`` section 4
+documents, where inflating the noise flattens NIS while leaving NEES untouched.
+Note the same trap exists on the ``R`` side: enlarging ``SIG_GYRO`` widens the
+band and flatters coverage without improving the estimate at all.
+
+By default the filter's model IS the plant
+------------------------------------------
+``joint_params_from_plant`` reads inertia out of MuJoCo's own mass matrix and
+copies the servo gains from the dict that generated the XML, the filter starts
+from exact truth, and 4 of the 6 states are measured directly with an ``R`` that
+is exactly right. Nothing here can go badly wrong, so good tracking is evidence
+about the plumbing, not about the estimator. The ``error injection`` flags exist
+to remove that guarantee -- ``--model-error 20`` roughly doubles NEES and
+``--model-error 50`` takes it to 230 with coverage collapsing to 0.11.
+
+``--unknown-input``: the deployment case
+----------------------------------------
+The default also hands the filter the commanded servo angle, which real hardware
+does not -- the setpoint lives inside the servo's own controller. With
+``--unknown-input`` the estimator never sees ``u``. The activation stops being
+driven and becomes a random walk recovered from the observed motion, which works
+because it is observable from the encoder and gyro alone.
+
+Since ``tau`` is short next to the command's timescale, the estimated activation
+*is* the recovered command: the dotted ``U est`` trace on the joint plots is a
+command the filter was never given. Measured over a 10 s sweep it sits 0.21 deg
+from the true command, against a 60 deg travel.
+
+The surprise is that it comes out **more** consistent, not less: median NEES 4.3
+against the input-driven filter's 20.3, with coverage 0.88 against 0.37. The
+random walk's process noise also absorbs the unmodelled gravity and
+actuator-convention bias that makes the input-driven filter overconfident.
+Accuracy still degrades, which is the honest cost -- joint error 0.078 deg
+against 0.047 deg.
+
+``--psd-act`` is load-bearing here and defaults differently per mode. Carrying
+the known-input jitter value into this mode is the specific trap: at 1e-6 the
+blind filter reads NEES 77910, coverage 0.01, and the recovered command lags the
+real one by 238 ms.
 
 Run::
 
     python scripts/finger_viewer.py                    # synthetic input
     python scripts/finger_viewer.py --pot --simulate   # pot GUI stack, no hardware
     python scripts/finger_viewer.py --pot --port COM5  # real potentiometers
+    python scripts/finger_viewer.py --model-error 20   # make the filter earn it
+    python scripts/finger_viewer.py --unknown-input    # as deployed: u withheld
+    python scripts/finger_viewer.py --sensor-latency 0.005 0.001 --buffer-horizon 0.01
 
 Not part of the ``erp`` package: this is an application. The reusable parts
 (kinematics, ellipse geometry, the estimator itself) live in ``erp``.
@@ -60,7 +114,7 @@ import os
 import queue
 import sys
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 
 import numpy as np
@@ -78,6 +132,7 @@ import mujoco as mj  # noqa: E402
 import pyqtgraph as pg  # noqa: E402
 from PyQt5 import QtCore, QtGui, QtWidgets  # noqa: E402
 
+from erp.core.linalg import make_spd, nees  # noqa: E402
 from erp.core.timeline import InputHistory  # noqa: E402
 from erp.core.types import CalibrationResult, ControlInput, GaussianState, Measurement  # noqa: E402
 from erp.estimators.ekf import ExtendedKalmanFilter  # noqa: E402
@@ -107,14 +162,19 @@ ACTUATORS = {
 }
 
 SIG_ENC = math.radians(0.15)     # encoder noise, rad  (~0.15 deg, a 10-bit pot)
-SIG_GYRO = 5e-3                  # rate gyro noise, rad/s
+SIG_GYRO = 9e-2                  # rate gyro noise, rad/s
 PSD_ALPHA = 4.0                  # angular-acceleration disturbance PSD, rad^2/s^3
 PSD_ACT = 1e-6                   # servo activation jitter PSD, rad^2/s
+# With --unknown-input, psd_act stops being jitter around a known setpoint and
+# has to cover the whole unknown actuation, so it is ~3 orders larger. Inheriting
+# PSD_ACT there leaves the filter 959x overconfident; see test_consistency.
+PSD_ACT_BLIND = 8e-4             # activation random-walk PSD, rad^2/s
 F_INPUT, F_ENC, F_GYRO = 200.0, 100.0, 250.0
 
 HISTORY_SECONDS = 12.0
 UI_PERIOD_MS = 33
 COLOR_U, COLOR_TRUE, COLOR_EST = "#888888", "#4c8fd8", "#e08a3c"
+COLOR_UEST = "#2e8b57"           # recovered command, when the filter is not told it
 
 
 def build_xml(template: str, *, motor_lag: bool, gravity: str,
@@ -146,7 +206,8 @@ def build_xml(template: str, *, motor_lag: bool, gravity: str,
 
 
 def joint_params_from_plant(model: mj.MjModel, data: mj.MjData,
-                            psd_alpha: float = PSD_ALPHA) -> list[JointParams]:
+                            psd_alpha: float = PSD_ALPHA,
+                            psd_act: float = PSD_ACT) -> list[JointParams]:
     """Derive the estimator's linear model from the compiled plant.
 
     Effective inertia is read out of MuJoCo's own mass matrix at the neutral
@@ -171,9 +232,51 @@ def joint_params_from_plant(model: mj.MjModel, data: mj.MjData,
             kp=act["kp"], kv=act["kv"],
             damping=GEOMETRY["b"] + act["damping"],   # structural + gearbox, summed
             inertia=float(M[i, i]),
-            tau=act["tau"], psd_alpha=psd_alpha, psd_act=PSD_ACT,
+            tau=act["tau"], psd_alpha=psd_alpha, psd_act=psd_act,
         ))
     return out
+
+
+def perturb_joint_params(joints: list[JointParams], pct: float,
+                         rng: np.random.Generator) -> list[JointParams]:
+    """Give the *filter* a model that differs from the plant by +/- ``pct`` percent.
+
+    Without this the viewer cannot fail. ``joint_params_from_plant`` reads
+    inertia out of MuJoCo's own mass matrix and copies kp/kv/tau/damping from
+    the dict that generated the XML, so the filter's ``A_c`` equals the plant's
+    to machine precision -- a luxury no real system has, where inertia is
+    rarely known better than ~10 %. Tracking that looks excellent under a
+    perfectly matched model is evidence about the plumbing, not the estimator.
+
+    Perturbs inertia, kp, kv and damping independently. ``tau`` is left alone:
+    the servo time constant is the one parameter a datasheet actually pins down.
+    """
+    if pct <= 0.0:
+        return joints
+    def jitter() -> float:
+        return 1.0 + float(rng.uniform(-pct, pct)) / 100.0
+    return [
+        replace(jp, inertia=jp.inertia * jitter(), kp=jp.kp * jitter(),
+                kv=jp.kv * jitter(), damping=jp.damping * jitter())
+        for jp in joints
+    ]
+
+
+def sample_gaussian(rng: np.random.Generator, cov: np.ndarray) -> np.ndarray:
+    """Draw a zero-mean sample from ``cov``; robust where it is near-singular."""
+    return np.asarray(np.linalg.cholesky(make_spd(cov)) @ rng.normal(size=cov.shape[0]))
+
+
+def quantize(z: np.ndarray, span: float, bits: int) -> np.ndarray:
+    """Round ``z`` onto a ``bits``-resolution grid spanning ``span`` radians.
+
+    A potentiometer's dominant error is quantization, which is uniform and
+    correlated with the signal -- not the white Gaussian the filter's ``R``
+    assumes. Turning this on is therefore a way to make ``R`` wrong on purpose,
+    in the direction real hardware is wrong.
+    """
+    step = span / (2**bits - 1)
+    return np.asarray(np.round(z / step) * step)
 
 
 # ---------------------------------------------------------------------------
@@ -263,21 +366,42 @@ class QueueSensor(Sensor):
 
     A real driver would fill the same queue from a serial port. The engine
     cannot tell the difference, which is the point of the Adapter.
+
+    ``latency`` models transport delay: a sample taken at ``t`` is stamped ``t``
+    -- the timestamp is always the *sample* instant -- but does not become
+    readable until ``t + latency``. That split is the whole reason
+    ``Measurement.timestamp`` and arrival time are separate concepts, and with
+    a non-zero value here the engine's ``buffer_horizon`` and ``discarded``
+    counters finally do something.
     """
 
-    def __init__(self, model: MeasurementModel, dim: int, frame_id: str) -> None:
+    def __init__(self, model: MeasurementModel, dim: int, frame_id: str,
+                 latency: float = 0.0) -> None:
         self._model, self._dim, self._frame_id = model, dim, frame_id
-        self._pending: list[Measurement] = []
+        self._latency = float(latency)
+        self._pending: list[tuple[float, Measurement]] = []
+        self._now = 0.0
+
+    def set_clock(self, t: float) -> None:
+        """Tell the sensor what time it is, so ``drain`` can withhold late samples."""
+        self._now = float(t)
 
     def emit(self, z: np.ndarray, t: float) -> None:
-        self._pending.append(Measurement(z=z, timestamp=t, frame_id=self._frame_id))
+        self._pending.append(
+            (t + self._latency, Measurement(z=z, timestamp=t, frame_id=self._frame_id))
+        )
 
     def read(self) -> Measurement | None:
-        return self._pending.pop(0) if self._pending else None
+        for i, (arrival, m) in enumerate(self._pending):
+            if arrival <= self._now:
+                del self._pending[i]
+                return m
+        return None
 
     def drain(self) -> list[Measurement]:
-        out, self._pending = self._pending, []
-        return out
+        ready = [m for arrival, m in self._pending if arrival <= self._now]
+        self._pending = [(a, m) for a, m in self._pending if a > self._now]
+        return ready
 
     def calibrate(self) -> CalibrationResult:
         return CalibrationResult(np.zeros(self._dim), np.ones(self._dim),
@@ -302,23 +426,32 @@ class Trace:
     q_true: list[np.ndarray] = field(default_factory=list)
     q_est: list[np.ndarray] = field(default_factory=list)
     sigma: list[np.ndarray] = field(default_factory=list)
+    nees: list[float] = field(default_factory=list)
+    # Estimated servo activation. In unknown-input mode this is the recovered
+    # command: `a` tracks `u` through a tau=4ms lag, so plotting it against the
+    # true U shows the filter reconstructing an input it was never given.
+    u_est: list[np.ndarray] = field(default_factory=list)
 
     def append(self, t: float, u: np.ndarray, q_true: np.ndarray,
-               q_est: np.ndarray, sigma: np.ndarray) -> None:
+               q_est: np.ndarray, sigma: np.ndarray, nees_val: float,
+               u_est: np.ndarray) -> None:
         self.t.append(t)
         self.u.append(u.copy())
         self.q_true.append(q_true.copy())
         self.q_est.append(q_est.copy())
         self.sigma.append(sigma.copy())
+        self.nees.append(nees_val)
+        self.u_est.append(u_est.copy())
 
     def trim(self, horizon: float) -> None:
         while self.t and self.t[-1] - self.t[0] > horizon:
-            for seq in (self.t, self.u, self.q_true, self.q_est, self.sigma):
+            for seq in (self.t, self.u, self.q_true, self.q_est, self.sigma,
+                        self.nees, self.u_est):
                 seq.pop(0)
 
     def arrays(self) -> tuple[np.ndarray, ...]:
         return (np.asarray(self.t), np.asarray(self.u), np.asarray(self.q_true),
-                np.asarray(self.q_est), np.asarray(self.sigma))
+                np.asarray(self.q_est), np.asarray(self.sigma), np.asarray(self.u_est))
 
 
 class FingerSession:
@@ -327,7 +460,12 @@ class FingerSession:
     def __init__(self, source: SyntheticInput | PotentiometerInput,
                  *, gravity: bool, buffer_horizon: float, seed: int,
                  psd_alpha: float = PSD_ALPHA, plant_dt: float = 0.002,
-                 actearly: bool = True) -> None:
+                 actearly: bool = True, model_error: float = 0.0,
+                 init_error: bool = False, enc_bits: int = 0,
+                 gyro_bias: float = 0.0,
+                 sensor_latency: tuple[float, float] = (0.0, 0.0),
+                 pot_span: float = 120.0, known_input: bool = True,
+                 psd_act: float | None = None) -> None:
         template = (_ROOT / "notebooks" / "assets" / "finger_2link.xml").read_text(
             encoding="utf-8")
         grav = SIM_OPTIONS["gravity"] if gravity else "0 0 0"
@@ -341,25 +479,62 @@ class FingerSession:
         self.source = source
         self.rng = np.random.default_rng(seed)
         self.dt = float(self.model.opt.timestep)
+        self.enc_bits = enc_bits
+        self.gyro_bias = gyro_bias
+        self.pot_span = np.deg2rad(pot_span)
 
-        joints = joint_params_from_plant(self.model, self.data, psd_alpha)
-        process = servoed_finger_model(joints)
+        self.known_input = known_input
+        if psd_act is None:
+            psd_act = PSD_ACT if known_input else PSD_ACT_BLIND
+
+        # The plant's own parameters; the filter gets a perturbed copy so that a
+        # matched model is a deliberate choice rather than an accident.
+        # Drawn from a SEPARATE stream: sharing self.rng would make the sensor
+        # noise realisation depend on whether --model-error was passed, so the
+        # knob would move two things at once and nothing could be attributed.
+        self.plant_joints = joint_params_from_plant(self.model, self.data, psd_alpha, psd_act)
+        self.process = servoed_finger_model(
+            perturb_joint_params(self.plant_joints, model_error,
+                                 np.random.default_rng(seed + 1)),
+            known_input=known_input)
         P0 = np.diag([1e-6, 1e-6, 1e-4, 1e-4, 1e-6, 1e-6])
-        self.ekf = ExtendedKalmanFilter(process, GaussianState(np.zeros(6), P0))
+        x0 = sample_gaussian(self.rng, P0) if init_error else np.zeros(6)
+        self.ekf = ExtendedKalmanFilter(self.process, GaussianState(x0, P0))
 
-        self.enc = QueueSensor(joint_block_model(2, "angle", SIG_ENC), 2, "joint")
-        self.gyro = QueueSensor(joint_block_model(2, "rate", SIG_GYRO), 2, "joint")
+        # Per-sensor latency, not one shared value: equal latencies preserve
+        # arrival order, so nothing ever arrives late relative to the filter and
+        # engine.discarded stays empty no matter how large they are. It is the
+        # *difference* between sensors that produces reordering, which is the
+        # thing buffer_horizon exists to absorb.
+        lat_enc, lat_gyro = sensor_latency
+        self.enc = QueueSensor(joint_block_model(2, "angle", SIG_ENC), 2, "joint",
+                               latency=lat_enc)
+        self.gyro = QueueSensor(joint_block_model(2, "rate", SIG_GYRO), 2, "joint",
+                                latency=lat_gyro)
 
+        # Two histories when the command is withheld. `self.inputs` is the real
+        # one -- it drives the plant and feeds the U trace. `filter_inputs` is
+        # what the estimator is allowed to see: a single zero, held forever.
+        # Not an empty history, because FusionEngine still queries u_at at every
+        # event and u_at raises rather than fabricating actuation that never
+        # happened. With B_c = 0 the value is ignored; what matters is that it
+        # yields no breakpoints, so intervals split at measurements only.
         self.inputs = InputHistory()
         self.inputs.push(ControlInput(u=source.command(0.0).copy(), timestamp=0.0))
+        if known_input:
+            self.filter_inputs = self.inputs
+        else:
+            self.filter_inputs = InputHistory()
+            self.filter_inputs.push(ControlInput(u=np.zeros(2), timestamp=0.0))
         self.engine = FusionEngine(
-            self.ekf, {"enc": self.enc, "gyro": self.gyro}, self.inputs,
+            self.ekf, {"enc": self.enc, "gyro": self.gyro}, self.filter_inputs,
             buffer_horizon=buffer_horizon, t0=0.0,
         )
 
         self.trace = Trace()
         self._next = {"input": 1.0 / F_INPUT, "enc": 1.0 / F_ENC, "gyro": 1.0 / F_GYRO}
         self._u = self.inputs.u_at(0.0).copy()
+        self.belief = self.ekf.state.copy()
 
     @property
     def sim_time(self) -> float:
@@ -385,32 +560,69 @@ class FingerSession:
             # while reusing the previous ctrl desynchronises by a whole step,
             # which then masquerades as model error.
             if t >= self._next["enc"]:
-                z = self.data.qpos[:2] + self.rng.normal(0, SIG_ENC, 2)
+                if self.enc_bits:
+                    z = quantize(np.asarray(self.data.qpos[:2]), self.pot_span, self.enc_bits)
+                else:
+                    z = self.data.qpos[:2] + self.rng.normal(0, SIG_ENC, 2)
                 self.enc.emit(z, t)
                 self._next["enc"] += 1.0 / F_ENC
             if t >= self._next["gyro"]:
-                z = self.data.qvel[:2] + self.rng.normal(0, SIG_GYRO, 2)
+                z = (self.data.qvel[:2] + self.gyro_bias
+                     + self.rng.normal(0, SIG_GYRO, 2))
                 self.gyro.emit(z, t)
                 self._next["gyro"] += 1.0 / F_GYRO
 
             self.data.ctrl[:] = self._u
             mj.mj_step(self.model, self.data)
 
-        self.engine.step(self.sim_time)
+        now = self.sim_time
+        for sensor in (self.enc, self.gyro):
+            sensor.set_clock(now)
+        self.engine.step(now)
+        # The filter's belief is valid at engine.time, which trails `now` by the
+        # buffer horizon plus the gap to the last processed event. Scoring it
+        # against truth sampled at `now` would compare two different instants --
+        # at these joint rates that mismatch alone can exceed the 2-sigma band
+        # it is being judged against, and it reads as filter inconsistency while
+        # actually being an error in the diagnostic.
+        self.belief = self.engine.belief_at(now)
         self._record()
         self.inputs.prune_before(self.engine.time - 1.0)
 
+    @property
+    def lag(self) -> float:
+        """Seconds the filter's own belief trails the plant by, before extrapolation."""
+        return self.sim_time - self.engine.time
+
+    def x_true(self) -> np.ndarray:
+        """Full 6-state truth from the plant, in the model's blocked layout.
+
+        MuJoCo carries all of it: ``qpos``/``qvel`` for the joints and ``act``
+        for the servo activations, which exist because the actuator is compiled
+        with ``dyntype="filterexact"``. The activation block *is* the model's
+        ``a``: ``a' = (u - a)/tau`` matches ``filterexact`` with ``dynprm=tau``,
+        and ``force = kp(a - q) - kv v`` matches ``A_c[iv, ia] = kp/inertia``.
+
+        Having all six means NEES can be reported against the whole state, which
+        is the diagnostic CLAUDE.md asks for -- unlike per-joint coverage it
+        exercises the cross-terms, and unlike coverage it cannot be flattered by
+        inflating R.
+        """
+        return np.concatenate([self.data.qpos[:2], self.data.qvel[:2], self.data.act[:2]])
+
     def _record(self) -> None:
-        state = self.ekf.state
+        state = self.belief
         self.trace.append(
             self.sim_time, self._u, np.asarray(self.data.qpos[:2]),
             state.x[:2], np.sqrt(np.diag(state.P)[:2]),
+            nees(self.x_true(), state.x, state.P),
+            state.x[4:],                     # estimated activation = recovered command
         )
         self.trace.trim(HISTORY_SECONDS)
 
     def tip(self) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
-        """Return ``(true_tip_yz, est_tip_yz, tip_covariance)``."""
-        state = self.ekf.state
+        """Return ``(true_tip_yz, est_tip_yz, tip_covariance)``, all at ``sim_time``."""
+        state = self.belief
         true_p = fk_tip(np.asarray(self.data.qpos[:2]), self.geom)[1:]
         est_p = fk_tip(state.x[:2], self.geom)[1:]
         return true_p, est_p, tip_covariance(state.x[:2], state.P[:2, :2], self.geom)
@@ -456,6 +668,12 @@ class Window(QtWidgets.QMainWindow):
                                             style=QtCore.Qt.DashLine), name="U command"),
                 "true": plot.plot(pen=pg.mkPen(COLOR_TRUE, width=2), name="Q true"),
                 "est": plot.plot(pen=pg.mkPen(COLOR_EST, width=2), name="Q est"),
+                # The estimated servo activation, in the same units as the
+                # command. Only shown when the filter was never told U -- with
+                # the command available it would just retrace the dashed line.
+                "u_est": plot.plot(
+                    pen=pg.mkPen(COLOR_UEST, width=2, style=QtCore.Qt.DotLine),
+                    name="U est (recovered)"),
             }
             self.joint_plots.append(plot)
             self.joint_curves.append(curves)
@@ -525,7 +743,7 @@ class Window(QtWidgets.QMainWindow):
         self.view.setPixmap(QtGui.QPixmap.fromImage(image))
 
     def _draw_plots(self) -> None:
-        t, u, q_true, q_est, sigma = self.session.trace.arrays()
+        t, u, q_true, q_est, sigma, u_est = self.session.trace.arrays()
         if t.size < 2:
             return
         deg = np.degrees
@@ -534,6 +752,10 @@ class Window(QtWidgets.QMainWindow):
             curves["u"].setData(t, deg(u[:, j]))
             curves["true"].setData(t, deg(q_true[:, j]))
             curves["est"].setData(t, deg(q_est[:, j]))
+            if self.session.known_input:
+                curves["u_est"].setData([], [])
+            else:
+                curves["u_est"].setData(t, deg(u_est[:, j]))
 
         err = deg(q_est - q_true)
         band = 2.0 * deg(sigma)
@@ -569,8 +791,14 @@ class Window(QtWidgets.QMainWindow):
         # the ellipse above can be believed. Near 0.95 the filter is honest;
         # near 0.10 it is tracking well and lying about how well.
         coverage = float((np.abs(err) <= band).mean())
+        # Median, not mean: NEES is heavy-tailed, driven by brief stretches where
+        # P is small. Target is dim(x) = 6.
+        med_nees = float(np.median(self.session.trace.nees))
+        mode = "u known" if self.session.known_input else "u WITHHELD"
         self.status.showMessage(
-            f"sim {self.session.sim_time:7.2f} s  |  filter {self.session.engine.time:7.2f} s"
+            f"sim {self.session.sim_time:7.2f} s  |  {mode}"
+            f"  |  lag {1e3 * self.session.lag:4.1f} ms"
+            f"  |  NEES {med_nees:7.2f} (want 6)"
             f"  |  tip err {1e6 * np.linalg.norm(est_p - true_p):6.1f} um"
             f"  |  2-sigma {2e6 * major:5.1f} x {2e6 * minor:4.1f} um"
             f" ({major / max(minor, 1e-18):.0f}:1)"
@@ -614,6 +842,43 @@ def main() -> int:
     ap.add_argument("--ellipse-gain", type=float, default=200.0,
                     help="magnification of the tip 2-sigma ellipse, for visibility")
     ap.add_argument("--seed", type=int, default=0)
+    ap.add_argument("--unknown-input", action="store_true",
+                    help="withhold the servo command from the FILTER, as on real hardware "
+                         "where the setpoint lives inside the servo's controller. The "
+                         "activation becomes a random walk estimated from motion alone; the "
+                         "'U est' trace is that estimate, i.e. the recovered command")
+    ap.add_argument("--psd-act", type=float, default=None,
+                    help=f"activation noise PSD, rad^2/s. Defaults to {PSD_ACT:g} with the "
+                         f"command known and {PSD_ACT_BLIND:g} with --unknown-input, where it "
+                         f"must cover the whole unknown actuation rather than jitter around a "
+                         f"known setpoint. Inheriting the smaller value leaves the blind "
+                         f"filter ~959x overconfident")
+
+    # Error injection. All default to off, so the numbers quoted in the module
+    # docstring stay reproducible. With every one of them off the filter's model
+    # IS the plant and the initial state is exactly true, which is why the
+    # defaults track so well -- see perturb_joint_params.
+    err = ap.add_argument_group("error injection (default: none, i.e. a perfectly matched filter)")
+    err.add_argument("--model-error", type=float, default=0.0, metavar="PCT",
+                     help="perturb the FILTER's inertia/kp/kv/damping by +/- PCT percent "
+                          "relative to the plant. The single biggest missing error source. "
+                          "Measured from a 20.3 baseline: 20 roughly doubles NEES, 50 takes "
+                          "it to ~230 and collapses coverage to 0.11")
+    err.add_argument("--init-error", action="store_true",
+                     help="start the filter from a sample of P0 instead of exact truth, "
+                          "so there is an acquisition transient")
+    err.add_argument("--enc-bits", type=int, default=0, metavar="N",
+                     help="quantize the encoder to N bits over --pot-range instead of adding "
+                          "Gaussian noise, making R wrong the way a real pot makes it wrong")
+    err.add_argument("--gyro-bias", type=float, default=0.0, metavar="RAD_S",
+                     help="constant gyro bias, rad/s -- the unmodelled error a rate sensor "
+                          "actually has")
+    err.add_argument("--sensor-latency", type=float, nargs=2, default=(0.0, 0.0),
+                     metavar=("ENC_S", "GYRO_S"),
+                     help="hold encoder / gyro samples this many seconds before the engine "
+                          "can read them. config/estimation.yaml declares 0.005 and 0.001. "
+                          "UNEQUAL values are what produce reordering, and so what makes "
+                          "--buffer-horizon and the dropped counter mean anything")
     args = ap.parse_args()
 
     source: SyntheticInput | PotentiometerInput
@@ -623,10 +888,15 @@ def main() -> int:
         source = SyntheticInput()
 
     app = QtWidgets.QApplication(sys.argv)
+    lo, hi = args.pot_range
     session = FingerSession(source, gravity=not args.no_gravity,
                             buffer_horizon=args.buffer_horizon, seed=args.seed,
                             psd_alpha=args.psd_alpha, plant_dt=args.plant_dt,
-                            actearly=not args.no_actearly)
+                            actearly=not args.no_actearly,
+                            model_error=args.model_error, init_error=args.init_error,
+                            enc_bits=args.enc_bits, gyro_bias=args.gyro_bias,
+                            sensor_latency=tuple(args.sensor_latency), pot_span=hi - lo,
+                            known_input=not args.unknown_input, psd_act=args.psd_act)
     source.start()
     window = Window(session, args.speed, args.ellipse_gain)
     window.show()

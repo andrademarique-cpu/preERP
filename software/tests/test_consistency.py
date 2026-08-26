@@ -11,6 +11,8 @@ just as hard as the correct one.
 
 from __future__ import annotations
 
+from dataclasses import replace
+
 import numpy as np
 import pytest
 from scipy.stats import chi2
@@ -100,8 +102,14 @@ def simulate(rng: np.random.Generator, inputs: InputHistory) -> tuple[
     return schedule, truth, meas
 
 
-def run_filter(model: ProcessModel, seed: int) -> tuple[list[float], list[float]]:
-    """Run one Monte Carlo realisation; return per-measurement NEES and NIS."""
+def run_filter(model: ProcessModel, seed: int,
+               engine_inputs: InputHistory | None = None) -> tuple[list[float], list[float]]:
+    """Run one Monte Carlo realisation; return per-measurement NEES and NIS.
+
+    ``engine_inputs`` overrides what the *estimator* is allowed to see. Truth is
+    always generated from the real command history, so passing a blind history
+    models a deployment where the servo setpoint never reaches the filter.
+    """
     rng = np.random.default_rng(seed)
     inputs = build_inputs()
     schedule, truth, meas = simulate(rng, inputs)
@@ -110,7 +118,7 @@ def run_filter(model: ProcessModel, seed: int) -> tuple[list[float], list[float]
     engine = FusionEngine(
         ekf,
         {"enc": ReplaySensor(meas["enc"], ENC), "gyro": ReplaySensor(meas["gyro"], GYRO)},
-        inputs,
+        inputs if engine_inputs is None else engine_inputs,
         buffer_horizon=0.0,
     )
 
@@ -125,7 +133,7 @@ def run_filter(model: ProcessModel, seed: int) -> tuple[list[float], list[float]
     return nees_vals, nis_vals
 
 
-def median_nees(model: ProcessModel) -> float:
+def median_nees(model: ProcessModel, engine_inputs: InputHistory | None = None) -> float:
     """Median NEES pooled over independent runs.
 
     The median, not the mean: the distribution is heavy-tailed, driven by brief
@@ -134,7 +142,7 @@ def median_nees(model: ProcessModel) -> float:
     """
     pooled: list[float] = []
     for seed in range(N_RUNS):
-        pooled.extend(run_filter(model, seed)[0])
+        pooled.extend(run_filter(model, seed, engine_inputs)[0])
     return float(np.median(pooled))
 
 
@@ -239,6 +247,113 @@ def test_dwna_process_noise_fails_catastrophically() -> None:
     """
     med = median_nees(DwnaQModel(servoed_finger_model(JOINTS), DT_NOMINAL, JOINTS[0].psd_alpha))
     assert med > 100 * NX, f"expected catastrophic overconfidence, got median NEES {med:.3f}"
+
+
+# ---------------------------------------------------------------------------
+# Unknown input: the estimator is never told the servo command.
+# ---------------------------------------------------------------------------
+
+# Random-walk PSD on the activation, rad^2/s. Tuned, not derived -- the same
+# standing caveat as psd_alpha. Chosen by sweeping against NEES: 1e-6 lands at
+# 959x target, 8e-4 at 0.98, 1e0 at 0.35. Over five disjoint 20-run blocks 8e-4
+# holds 0.918-1.039 of target, which is as tight as the input-driven reference's
+# own 0.967-1.016, so it clears CONSISTENT_BAND with real margin rather than by
+# sitting on the edge. Note 1.3e-3 does NOT: it straddles the 0.85 floor at
+# 0.817-0.906 and would flake.
+BLIND_PSD_ACT = 8e-4
+
+
+def blind_model(psd_act: float = BLIND_PSD_ACT) -> ProcessModel:
+    return servoed_finger_model(
+        [replace(jp, psd_act=psd_act) for jp in JOINTS], known_input=False)
+
+
+def blind_inputs() -> InputHistory:
+    """What the estimator is allowed to see: a single zero, held forever.
+
+    Not an empty history -- FusionEngine still queries u_at at every event, and
+    u_at raises rather than fabricating actuation that never happened. With
+    B_c = 0 the value is ignored; what matters is that it yields no breakpoints,
+    so intervals are split at measurements only, which is correct when there is
+    no input to split on.
+    """
+    h = InputHistory()
+    h.push(ControlInput(u=np.zeros(NJ), timestamp=0.0))
+    return h
+
+
+def test_blind_filter_is_consistent_without_the_command() -> None:
+    """A filter never told u must still be consistent, on the same band.
+
+    Truth follows the real commands; only the estimator is blind. It recovers
+    the actuation from motion alone -- the activation is observable from the
+    encoder and gyro (rank 3n) -- so this is a genuine mismatched-model test,
+    not a self-consistent one. Landing inside the *same* CONSISTENT_BAND as the
+    input-driven filter is the claim worth making: withholding u costs accuracy,
+    not consistency, provided psd_act covers the unknown actuation.
+    """
+    med = median_nees(blind_model(), blind_inputs())
+    lo, hi = CONSISTENT_BAND
+    assert lo <= med <= hi, f"median NEES {med:.3f} outside [{lo:.3f}, {hi:.3f}] for nx={NX}"
+
+
+def test_blind_filter_costs_accuracy_relative_to_knowing_the_command() -> None:
+    """Consistency is not the same as accuracy: the blind filter must be worse.
+
+    If withholding u cost nothing, the state augmentation would be pointless and
+    the mode would be proving nothing. Compared on RMS state error rather than
+    NEES, since a conservative filter can be consistent and inaccurate at once.
+    """
+
+    def rms_error(model: ProcessModel, engine_inputs: InputHistory | None) -> float:
+        rng = np.random.default_rng(0)
+        inputs = build_inputs()
+        schedule, truth, meas = simulate(rng, inputs)
+        ekf = ExtendedKalmanFilter(model, GaussianState(np.zeros(NX), P0.copy()))
+        engine = FusionEngine(
+            ekf,
+            {"enc": ReplaySensor(meas["enc"], ENC), "gyro": ReplaySensor(meas["gyro"], GYRO)},
+            inputs if engine_inputs is None else engine_inputs,
+            buffer_horizon=0.0,
+        )
+        errs = []
+        for i, (t_m, _) in enumerate(schedule):
+            engine.step(t_m)
+            errs.append(float(np.linalg.norm(truth[i] - engine.state.x)))
+        return float(np.sqrt(np.mean(np.square(errs))))
+
+    knows_u = rms_error(servoed_finger_model(JOINTS), None)
+    blind = rms_error(blind_model(), blind_inputs())
+    assert blind > knows_u, (
+        f"blind filter RMS error {blind:.4g} did not exceed the input-driven "
+        f"filter's {knows_u:.4g} -- withholding u should cost something"
+    )
+
+
+def test_blind_filter_with_too_little_activation_noise_fails() -> None:
+    """Falsification: a random walk too tight to cover the real command drift.
+
+    The severe direction. The filter believes it knows an actuation it was never
+    told, so it is overconfident by three orders of magnitude -- measured at 959x
+    target for psd_act = 1e-6, which is the *default* jitter value in
+    config/estimation.yaml and therefore exactly the wrong number to inherit
+    when switching modes.
+    """
+    med = median_nees(blind_model(1e-6), blind_inputs())
+    assert med > 100 * NX, f"expected catastrophic overconfidence, got median NEES {med:.3f}"
+
+
+def test_blind_filter_with_too_much_activation_noise_fails() -> None:
+    """Falsification: drowning the activation, conservative rather than explosive.
+
+    Worth separating from the case above, because the two fail in opposite
+    directions and only one of them is dangerous. Measured at 0.35 of target for
+    psd_act = 1.0: the estimate stays honest but stops being informative, and no
+    amount of extra noise makes it blow up.
+    """
+    med = median_nees(blind_model(1.0), blind_inputs())
+    lo, _ = CONSISTENT_BAND
+    assert med < lo, f"expected conservative failure below {lo:.3f}, got {med:.3f}"
 
 
 @pytest.mark.parametrize("scale", [1e-3, 1e3])

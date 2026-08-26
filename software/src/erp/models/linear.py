@@ -138,7 +138,8 @@ class JointParams:
     psd_act: float = 0.0
 
 
-def servoed_finger_model(joints: Sequence[JointParams]) -> LinearTimeInvariantModel:
+def servoed_finger_model(joints: Sequence[JointParams], *,
+                         known_input: bool = True) -> LinearTimeInvariantModel:
     """Build the process model for a finger of independently servoed joints.
 
     State is ``[q (rad), v (rad/s), a (rad)]`` in blocks, of size ``3 * n``.
@@ -153,7 +154,8 @@ def servoed_finger_model(joints: Sequence[JointParams]) -> LinearTimeInvariantMo
 
         q' = v
         v' = (kp (a - q) - (kv + damping) v) / inertia
-        a' = (u - a) / tau
+        a' = (u - a) / tau            # known_input=True
+        a' = w,  PSD psd_act          # known_input=False
 
     The ``a`` block is a first-order lag, exactly integrable at any step, so
     the augmented state costs nothing in variable-step accuracy.
@@ -162,6 +164,38 @@ def servoed_finger_model(joints: Sequence[JointParams]) -> LinearTimeInvariantMo
     ----------
     joints:
         One :class:`JointParams` per joint, ordered proximal to distal.
+    known_input:
+        Whether the commanded servo angle is available to the estimator.
+
+        On real hardware it usually is **not** -- the command lives inside the
+        servo's own controller. With ``False`` the activation stops being driven
+        by ``u`` and becomes a random-walk disturbance the filter estimates from
+        the observed motion instead. That is possible because ``a`` is
+        observable from an encoder and a gyro alone (observability rank ``3n``),
+        and because ``tau`` is short next to the command's own timescale, the
+        estimated activation is effectively the recovered command, lagged by
+        ``tau``.
+
+        Two entries change, and **both** are required. ``B_c`` goes to zero, so
+        ``u`` is accepted and ignored. ``A_c[ia, ia]`` goes to zero as well:
+        leaving the ``-1/tau`` lag in place while removing its driving input
+        would make the activation *decay* rather than persist -- it retains only
+        0.368 of its value per 4 ms step at ``tau = 4 ms`` -- so the filter would
+        drag the estimated actuation toward zero and fight every measurement.
+
+        ``psd_act`` changes meaning accordingly: no longer servo command jitter
+        around a known setpoint, but the random-walk PSD that has to cover the
+        entire unknown actuation. It is correspondingly much larger, and it is a
+        tuned quantity rather than a derived one -- the same standing caveat as
+        ``psd_alpha``. ``tau`` is unused in this mode.
+
+    Raises
+    ------
+    ValueError
+        If ``known_input`` is ``False`` and any ``psd_act`` is not positive. A
+        frozen activation the filter believes exactly is the
+        catastrophic-overconfidence case, and it must not be reachable by
+        leaving the default at zero.
     """
     n = len(joints)
     if n == 0:
@@ -175,15 +209,24 @@ def servoed_finger_model(joints: Sequence[JointParams]) -> LinearTimeInvariantMo
     for i, jp in enumerate(joints):
         if jp.inertia <= 0.0 or jp.tau <= 0.0:
             raise ValueError(f"joint {i}: inertia and tau must be > 0")
+        if not known_input and jp.psd_act <= 0.0:
+            raise ValueError(
+                f"joint {i}: psd_act must be > 0 when known_input=False -- it is the "
+                f"random-walk PSD covering the entire unknown actuation, and a value of "
+                f"{jp.psd_act} would freeze the activation at a value the filter believes "
+                f"exactly"
+            )
         iq, iv, ia = i, n + i, 2 * n + i
         A_c[iq, iv] = 1.0
         A_c[iv, iq] = -jp.kp / jp.inertia
         A_c[iv, iv] = -(jp.kv + jp.damping) / jp.inertia
         A_c[iv, ia] = jp.kp / jp.inertia
-        A_c[ia, ia] = -1.0 / jp.tau
-        B_c[ia, i] = 1.0 / jp.tau
+        if known_input:
+            A_c[ia, ia] = -1.0 / jp.tau
+            B_c[ia, i] = 1.0 / jp.tau
+        # else: A_c[ia, ia] and B_c[ia, i] both stay zero -- a pure random walk.
         G[iv, i] = 1.0           # angular-acceleration disturbance on the rate
-        G[ia, n + i] = 1.0       # activation jitter
+        G[ia, n + i] = 1.0       # activation jitter, or the whole unknown actuation
         q[i, i] = jp.psd_alpha
         q[n + i, n + i] = jp.psd_act
 

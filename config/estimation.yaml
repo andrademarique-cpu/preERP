@@ -88,10 +88,37 @@ estimators:
   finger_ekf:
     type: ExtendedKalmanFilter   # erp.estimators.ekf
     process_model: servoed_finger_model
+    known_input: true            # the commanded servo angle reaches the filter
     # State is [q, v, a] in blocks: angle (rad), rate (rad/s), servo
     # activation (rad). The activation block is not optional -- dropping it
     # biases every accelerometer channel in a way no Q or R tuning repairs.
     # See ADR-0001 section 2.3.
+    initial_covariance:
+      angle: 1.0e-4       # rad^2
+      rate: 1.0e-2        # (rad/s)^2
+      activation: 1.0e-4  # rad^2
+
+  # Deployment configuration: on real hardware the setpoint lives inside the
+  # servo's own controller and never reaches the estimator. The activation stops
+  # being driven by u and becomes a random walk the filter estimates from the
+  # observed motion, which is possible because it is observable from the encoder
+  # and gyro alone (observability rank 3n).
+  finger_ekf_blind:
+    type: ExtendedKalmanFilter
+    process_model: servoed_finger_model
+    known_input: false
+    # psd_act MEANS SOMETHING DIFFERENT HERE. Under known_input it is jitter
+    # around a setpoint the filter already knows (1.0e-8 above). Here it must
+    # cover the entire unknown actuation, and is ~5 orders larger. Inheriting
+    # the jitter value is the specific mistake the falsification test guards:
+    # at 1.0e-6 the filter is 959x overconfident.
+    #
+    # Tuned against NEES, not derived -- same caveat as psd_alpha. Measured on
+    # the test harness: 8.0e-4 holds 0.918-1.039 of the chi-squared target over
+    # five disjoint 20-run blocks. Re-tune if the command bandwidth changes;
+    # the value scales roughly with the square of the command's rate of change.
+    psd_act: 8.0e-4       # rad^2/s, random-walk PSD on the activation
+    # tau is unused in this mode: there is no lag to integrate, only a walk.
     initial_covariance:
       angle: 1.0e-4       # rad^2
       rate: 1.0e-2        # (rad/s)^2

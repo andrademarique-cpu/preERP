@@ -163,6 +163,82 @@ def test_engine_never_advances_backwards() -> None:
         engine._advance_to(0.01)
 
 
+def test_belief_at_current_time_returns_an_unaliased_copy_of_the_belief() -> None:
+    """Extrapolating to `time` itself is a no-op, but must not hand out internals."""
+    engine = FusionEngine(
+        make_filter(), {}, make_inputs([(0.0, [0.0, 0.0])]), buffer_horizon=0.0
+    )
+    belief = engine.belief_at(engine.time)
+
+    assert np.array_equal(belief.x, engine.state.x)
+    assert np.array_equal(belief.P, engine.state.P)
+
+    belief.x[0] = 999.0
+    assert engine.state.x[0] != 999.0
+
+
+def test_belief_at_matches_a_manual_predict() -> None:
+    """With no input change in the interval, extrapolation is one predict."""
+    engine = FusionEngine(
+        make_filter(), {}, make_inputs([(0.0, [0.3, -0.2])]), buffer_horizon=0.0
+    )
+    belief = engine.belief_at(0.010)
+
+    by_hand = make_filter()
+    by_hand.predict(np.array([0.3, -0.2]), 0.010)
+
+    assert np.allclose(belief.x, by_hand.state.x, rtol=1e-12, atol=1e-16)
+    assert np.allclose(belief.P, by_hand.state.P, rtol=1e-12, atol=1e-20)
+
+
+def test_belief_at_splits_at_input_breakpoints() -> None:
+    """Falsification: holding a stale u across the whole gap gives a different answer.
+
+    This is the test that fails if `_segments` ever stops splitting -- the same
+    guarantee `test_prediction_splits_at_input_breakpoints` makes for the
+    mutating path, which now shares that implementation.
+    """
+    inputs = make_inputs([(0.0, [0.0, 0.0]), (0.005, [1.0, 0.5])])
+    engine = FusionEngine(make_filter(), {}, inputs, buffer_horizon=0.0)
+    belief = engine.belief_at(0.010)
+
+    by_hand = make_filter()
+    by_hand.predict(np.array([0.0, 0.0]), 0.005)
+    by_hand.predict(np.array([1.0, 0.5]), 0.005)
+    assert np.allclose(belief.x, by_hand.state.x, rtol=1e-12, atol=1e-16)
+
+    unsplit = make_filter()
+    unsplit.predict(np.array([0.0, 0.0]), 0.010)
+    assert not np.allclose(belief.x, unsplit.state.x, rtol=1e-6, atol=1e-9)
+
+
+def test_belief_at_does_not_advance_the_filter() -> None:
+    """Extrapolation is a read: scoring the filter must not perturb it."""
+    meas = [Measurement(np.zeros(2), t, "joint") for t in (0.010, 0.020)]
+    engine = FusionEngine(
+        make_filter(),
+        {"enc": ReplaySensor(meas, ENCODER)},
+        make_inputs([(0.0, [0.0, 0.0])]),
+        buffer_horizon=0.0,
+    )
+    engine.step(0.020)
+    t_before, x_before, P_before = engine.time, engine.state.x.copy(), engine.state.P.copy()
+
+    engine.belief_at(0.035)
+
+    assert engine.time == t_before
+    assert np.array_equal(engine.state.x, x_before)
+    assert np.array_equal(engine.state.P, P_before)
+
+
+def test_belief_at_rejects_times_before_the_filter() -> None:
+    engine = FusionEngine(
+        make_filter(), {}, make_inputs([(0.0, [0.0, 0.0])]), buffer_horizon=0.0, t0=0.05
+    )
+    with pytest.raises(ValueError, match="cannot extrapolate backwards"):
+        engine.belief_at(0.01)
+
+
 @pytest.mark.parametrize("build", ["replay", "dummy"])
 def test_sensor_contract_holds_for_every_implementation(build: str) -> None:
     """The same interface-level test must pass against a stub and a real source.

@@ -7,6 +7,12 @@ See [`README.md`](./README.md) for project context and
 for the design decisions the package is built on. This file is the
 condensed set of rules that must hold for any change to be acceptable.
 
+[`AGENTS.md`](./AGENTS.md) is a shorter restatement of the same rules for
+non-Claude agents. It duplicates the import boundary, the ABC freeze, the
+install commands and the CI list, so **when you change a rule here, check
+whether `AGENTS.md` now contradicts it** — there is nothing that keeps
+the two in sync automatically.
+
 ## Commands
 
 Everything below assumes the **`erp` conda env**. The base Anaconda env
@@ -145,6 +151,16 @@ that bite:
 Each change has a measured justification in ADR-0001 § 2; `Q(dt)` and the
 `u` arguments are load-bearing, not generality for its own sake.
 
+**The README's banner covers only the signatures, not the "Concrete
+implementations" table under it**, and almost nothing in that table
+exists: of the classes named there, only `ConstantAccelModel`,
+`ExtendedKalmanFilter` and `ReplaySensor` are real. `KalmanFilter`,
+`UnscentedKalmanFilter`, `FingerKinematicModel`, `ContactDynamicsModel`,
+`AccelerometerModel`, `ContactForceModel`, `JointEncoderModel`,
+`MembraneForceSensor`, `IMUSensor`, `EncoderSensor` and `SimulatedSensor`
+are a plan, not code. The `__all__` lists in each subpackage's
+`__init__.py` are the accurate inventory — read those.
+
 ## Architecture: everything hangs off the event timeline
 
 The single idea that explains the package is that **there is no tick**.
@@ -186,6 +202,18 @@ times. Four pieces implement that, and they only make sense together:
    deterministic, time-correlated bias that no `Q` or `R` inflation
    removes (NEES median 344 281 against a target of 4, versus 5.96
    against 6 once modelled).
+
+   `known_input=False` builds the **deployment** variant, where the servo
+   command never reaches the estimator — which is the real case, since
+   the setpoint lives inside the servo's controller. `B_c` **and**
+   `A_c[ia,ia]` both go to zero, making the activation a random walk the
+   filter recovers from motion (observable from encoder + gyro alone,
+   rank `3n`). Zeroing only `B_c` is the trap: the `-1/tau` lag would
+   then decay the activation to zero, retaining just 0.368 per 4 ms step.
+   In that mode `psd_act` stops meaning jitter around a known setpoint
+   and must cover the whole unknown actuation — ~5 orders larger, and the
+   constructor rejects `psd_act <= 0` because a frozen activation the
+   filter believes exactly is the catastrophic case.
 
 Two rules follow, and any change touching `fusion/` or a process model
 must preserve both:
@@ -238,13 +266,27 @@ standard Kalman filter, so there is deliberately no separate
 | `scripts/` | **applications, not package code** — `finger_viewer.py` (MuJoCo + PyQt live viewer). Extends `sys.path`, defines its own `Sensor` subclass. Reusable parts belong in `erp` | may import anything |
 | `ros2_ws/src/erp_ros/` | ROS 2 nodes, msgs, launch files **only** — a thin wrapper, not where logic lives | wraps `erp`, never the reverse |
 | `config/` | `estimation.yaml` — noise params, rates, geometry; new estimators/models must be registered here | — |
-| `notebooks/` | exploratory work — the finger-IMU EKF (`finger_imu_practice.ipynb`), plus older KF/UKF and MuJoCo practice, and the potentiometer logger | may import anything; nothing imports it |
-| `mechanical/`, `electronics/`, `firmware/` | hardware tracks — CAD, schematics, `potentiometer_logger.ino` | out of scope for Python-layer changes |
+| `notebooks/` | exploratory work — the finger-IMU EKF (`finger_imu_practice.ipynb`), plus older KF/UKF and MuJoCo practice, and `Potenctiometerlogging.py` | may import anything; **one exception, below** |
+| `mechanical/`, `electronics/`, `firmware/` | hardware tracks — CAD, schematics, `firmware/potentiometer_logger/potentiometer_logger.ino` | out of scope for Python-layer changes |
 | `docs/theory/` `docs/hardware/` `docs/adr/` | filter derivations, assembly/wiring docs, architecture decision records | — |
+
+Most of that tree is scaffolding: every directory under `mechanical/`,
+`electronics/`, `ros2_ws/src/`, `data/` and `docs/hardware/` is currently
+**empty**. Only `software/`, `scripts/`, `notebooks/`, `config/`,
+`docs/theory/`, `docs/adr/` and the one `.ino` hold files. Do not infer
+from a path in the table that there is content behind it.
 
 `software/src/erp/__init__.py` is empty by design — import from the
 subpackages (`from erp.models import servoed_finger_model`), which do
 re-export their public names.
+
+**The one place an application reaches into `notebooks/`:**
+`scripts/finger_viewer.py` puts `notebooks/` on `sys.path` and imports
+the potentiometer serial stack from `Potenctiometerlogging.py`. The typo
+in that filename is load-bearing — it is the user's own module and
+renaming it breaks their launch commands, so leave it alone. This is the
+allowed direction (an application may import anything); nothing in `erp`
+does or may do this.
 
 ## Conventions to follow when writing code here
 
@@ -292,16 +334,17 @@ obligations pass: `core/` (types, timeline, linalg), `models/` (van Loan
 discretisation, servoed-finger LTI model, linear measurement models,
 kinematics), `estimators/ekf.py`, `sensors/` (`ReplaySensor`,
 `DummySensor`), `fusion/engine.py`, `viz/ellipse.py`, and the first
-`config/estimation.yaml`. 63 tests pass in ~6 s.
+`config/estimation.yaml`. 63 tests pass in ~7 s.
 
 Not yet built: the UKF, real sensor drivers, `calibration/`, `io/`, and
 `ros2_ws/`. `test_smoke.py` is still a bare `assert True` from before the
 suite existed.
 
-Working tree has uncommitted changes: the packaging/install overhaul
-(`pyproject.toml`, `environment.yml`, `.github/workflows/ci.yml`,
-`README.md`, `AGENTS.md`, plus the mechanical lint fixes that the new
-`select` list surfaced) and `scripts/finger_viewer.py`.
+The packaging/install overhaul described above (`pyproject.toml`,
+`environment.yml`, `ci.yml`, `README.md`, `AGENTS.md`, plus the lint
+fixes the new `select` list surfaced) is **committed** as of `db11940`.
+Run `git status` and `git log --oneline -5` rather than trusting this
+paragraph — it is the one part of this file that goes stale on its own.
 
 Known open items, from ADR-0001 § 8 — worth reading before tuning
 anything:
@@ -309,16 +352,51 @@ anything:
 - `psd_alpha` in `config/estimation.yaml` is a placeholder. Re-deriving
   it from the physics is the blocking item before these filters mean
   anything on real data.
+- `psd_act` for the `known_input=False` model (`finger_ekf_blind`,
+  8.0e-4 rad²/s) is **tuned, not derived** — the same standing caveat.
+  It was chosen by sweeping against NEES: 1e-6 lands at 959× target,
+  8e-4 at 0.98, 1e0 at 0.35, and it holds 0.918–1.039 over five disjoint
+  20-run blocks. It scales roughly with the square of the command's rate
+  of change, so re-tune if the command bandwidth changes.
 - `actuation_delay_s` is unmeasured on the real chain.
 - The servoed-finger model is stiff (`A_c` entries ~5e4). Composition
   holds at ~1e-16 up to ~20 ms gaps but degrades to ~1e-7 by 50 ms, so a
   sensor slower than ~20 Hz would need this revisited.
-- `scripts/finger_viewer.py` tracks well but is **overconfident** (±2σ
-  coverage ~10 %, not 95 %): `erp` integrates the coupled `(q, v, a)`
-  system exactly while MuJoCo evaluates actuator force at a step
-  endpoint, and that difference is deterministic, so process noise cannot
-  absorb it. Raising `--psd-alpha` to force coverage is whitening a bias
-  — the mistake `docs/theory/finger_imu_ekf.md` § 4 documents.
+- `scripts/finger_viewer.py` is still **overconfident, but far less than
+  the ~10 % coverage figure suggested.** Most of that was a bug in the
+  *diagnostic*: the belief is valid at `engine.time` and was being scored
+  against truth at `sim_time`. Aligning them via `FusionEngine.belief_at`
+  took median NEES from 1145 to 20.3 over a 10 s sweep — a factor of 56,
+  none of it physics. What remains is 20.3 against a target of 6.
+  Measured contributors: unmodelled **gravity** (`--no-gravity` → 13.7;
+  `servoed_finger_model` has no gravity term), the actuator-force
+  convention (`erp` integrates `(q, v, a)` exactly while MuJoCo evaluates
+  force at a step endpoint — `--no-actearly` halves it), and decoupled
+  joints. Raising `--psd-alpha` to force coverage is whitening a bias —
+  the mistake `docs/theory/finger_imu_ekf.md` § 4 documents — and the
+  same trap exists on the `R` side via `SIG_GYRO`.
+- **The viewer's default configuration cannot fail**, so good tracking
+  there is evidence about the plumbing, not the estimator:
+  `joint_params_from_plant` reads inertia out of MuJoCo's own mass matrix
+  and copies the servo gains from the dict that generated the XML, the
+  filter starts from exact truth, and 4 of 6 states are measured directly
+  with an exactly-correct `R`. The `error injection` flag group exists to
+  remove that guarantee — `--model-error` (20 doubles NEES, 50 takes it
+  to ~230), `--init-error`, `--enc-bits`, `--gyro-bias`, and
+  `--sensor-latency ENC GYRO`. Latencies must be **unequal** to produce
+  reordering; `0.005 0.001` with `--buffer-horizon 0` yields ~30 drops,
+  and raising the horizon to 10 ms absorbs them all. `--buffer-horizon`
+  still defaults to **0.0**.
+- **`--unknown-input` is the configuration that resembles deployment**,
+  and it inverts the usual expectation: withholding `u` makes the filter
+  *more* consistent (median NEES 4.3 vs 20.3, coverage 0.88 vs 0.37)
+  because the activation random walk also absorbs the unmodelled gravity
+  and actuator-convention bias. The honest cost is accuracy — joint error
+  0.078° vs 0.047°. The dotted `U est` trace is the recovered command,
+  within 0.21° of truth on a 60° sweep. `--psd-act` defaults per mode;
+  carrying the known-input value (1e-6) into blind mode is the trap that
+  `test_blind_filter_with_too_little_activation_noise_fails` guards —
+  NEES 77910 and a 238 ms lag in the recovered command.
 
 ### Reference material
 

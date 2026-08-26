@@ -10,10 +10,11 @@ See ``docs/adr/0001-multi-rate-fusion.md``.
 from __future__ import annotations
 
 from collections import Counter
-from collections.abc import Mapping
+from collections.abc import Iterator, Mapping
 
+from erp.core.linalg import make_spd
 from erp.core.timeline import InputHistory
-from erp.core.types import GaussianState, Measurement
+from erp.core.types import Array, GaussianState, Measurement
 from erp.estimators.base import StateEstimator
 from erp.sensors.base import Sensor
 
@@ -132,17 +133,67 @@ class FusionEngine:
         self._pending = keep
         return self._estimator.state
 
-    def _advance_to(self, t_target: float) -> None:
-        """Predict forward to ``t_target``, splitting at input breakpoints.
+    def belief_at(self, t: float) -> GaussianState:
+        """Belief extrapolated to ``t``, **without** advancing the filter.
 
-        Each sub-interval sees a single constant ``u``, which is what makes the
-        zero-order-hold discretisation in the process model exact.
+        :attr:`time` trails ``t_now`` by the buffer horizon plus the gap to the
+        last processed event, so scoring :attr:`state` against a truth sampled
+        at ``t`` compares two different instants. On a fast-moving joint that
+        mismatch can exceed the covariance it is being judged against: it then
+        reads as filter inconsistency while actually being an error in the
+        diagnostic. This performs the explicit extrapolation that :attr:`time`
+        directs consumers to do.
+
+        The filter is left untouched -- this is not a prediction step, and
+        calling it does not move :attr:`time`.
+
+        For a nonlinear process model the propagation linearises about the
+        current mean, so this is a one-shot extrapolation rather than a re-run
+        of the filter across the interval.
+
+        Parameters
+        ----------
+        t:
+            Target time, seconds in the host time base. Must be at or after
+            :attr:`time`.
+
+        Returns
+        -------
+        A fresh :class:`~erp.core.types.GaussianState`; the caller owns its
+        arrays.
         """
+        if t < self._t:
+            raise ValueError(f"cannot extrapolate backwards: {t} < {self._t}")
+        state = self._estimator.state.copy()
+        model = self._estimator.process_model
+        x, P = state.x, state.P
+        for u, dt in self._segments(self._t, t):
+            F = model.jacobian(x, u, dt)
+            x = model.predict(x, u, dt)
+            P = make_spd(F @ P @ F.T + model.Q(dt))
+        return GaussianState(x, P)
+
+    def _segments(self, t0: float, t1: float) -> Iterator[tuple[Array, float]]:
+        """Yield ``(u, dt)`` covering ``(t0, t1]``, one constant ``u`` per segment.
+
+        ``u`` is piecewise constant, so integrating across a change with a
+        single value is a modelling error rather than a rounding one. Splitting
+        here is what makes the zero-order-hold discretisation in the process
+        model exact.
+
+        Both :meth:`_advance_to` and :meth:`belief_at` consume this, so the
+        splitting rule has exactly one implementation.
+        """
+        t = t0
+        for t_next in [*self._inputs.breakpoints_in(t0, t1), t1]:
+            if t_next > t:
+                yield self._inputs.u_at(t), t_next - t
+                t = t_next
+
+    def _advance_to(self, t_target: float) -> None:
+        """Predict forward to ``t_target``, splitting at input breakpoints."""
         if t_target < self._t:
             raise ValueError(f"cannot advance backwards: {t_target} < {self._t}")
-        t = self._t
-        for t_next in [*self._inputs.breakpoints_in(t, t_target), t_target]:
-            if t_next > t:
-                self._estimator.predict(self._inputs.u_at(t), t_next - t)
-                t = t_next
-        self._t = t
+        for u, dt in self._segments(self._t, t_target):
+            self._estimator.predict(u, dt)
+        self._t = t_target
