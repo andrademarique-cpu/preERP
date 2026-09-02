@@ -5,9 +5,21 @@
     <default>
         <mesh scale="0.001 0.001 0.001" />
         <geom contype="0" conaffinity="0" />
-        <!-- Servo de posicion: PD interno (kp/kv), recorrido +-90 deg, par tope 3 N*m. -->
+        <!-- Servos de posicion. La clase solo lleva lo que de verdad comparten:
+             kp/kv/forcerange van POR JUNTA, abajo en <actuator>.
+
+             Compartir una sola clase era el bug. Las cuatro juntas difieren por
+             48x en par de gravedad y 200x en inercia, y kp=50 / forcerange=30
+             para todas metia a `act` en chattering: pedia 30 N*m para sostener
+             una junta cuya carga de gravedad es 0.046 N*m. Saturado,
+             d(fuerza)/d(vel) = 0, implicitfast pierde su termino implicito, el
+             integrador degenera a explicito y kv*dt/M = 19.2 (limite: 2).
+
+             ctrlrange esta en RADIANES (compiler angle="radian") y es el setpoint
+             de posicion. Sin el, ctrllimited queda en false y los sliders del
+             visor caen al rango por defecto -1..1; ese +-1 no viene de la fisica. -->
         <default class="servo">
-            <position kp="50" kv="2" forcerange="-30 30" />
+            <position ctrlrange="-3.14 3.14" />
         </default>
     </default>
     <custom>
@@ -51,9 +63,27 @@
         </body>
     </worldbody>
     <actuator>
-        <position class="servo" name="rot_servo" joint="rot" />
-        <position class="servo" name="link1_servo" joint="link1" />
-        <position class="servo" name="link2_servo" joint="link2" />
-        <position class="servo" name="act_servo" joint="act" />
+        <!-- Dimensionado desde el UNICO dato de hardware que hay, v_max = 120 deg/s
+             = 2.094 rad/s, mas el par de gravedad medido sobre 13^4 poses:
+
+               forcerange ~ 3x el peor par de gravedad de esa junta
+               kv = forcerange / v_max   -> es la recta par-velocidad del motor
+                                            (par de bloqueo <-> velocidad sin carga)
+               kp = kv^2 / (4*M_max)     -> zeta = 1 en la pose menos amortiguada
+
+             Resultado: kv*dt/M < 2 en las cuatro (0.40 / 0.44 / 0.37 / 1.37), o sea
+             estable INCLUSO saturado, que es lo que antes fallaba. Droop bajo
+             gravedad: 0.00 / 1.98 / 1.06 / 0.11 deg.
+
+             OJO - un PD de posicion NO tiene techo de velocidad. Estas ganancias no
+             imponen los 120 deg/s: en un escalon de 90 deg el pico llega a ~1300
+             deg/s. El limite lo pone el limitador de CONSIGNA del notebook, que es
+             como lo hace un brazo real (generador de trayectoria -> servo).
+
+             joint    gravedad max    forcerange       kv       kp -->
+        <position class="servo" name="rot_servo"   joint="rot"   kp="1.62"  kv="0.477" forcerange="-1.0 1.0" />
+        <position class="servo" name="link1_servo" joint="link1" kp="63.35" kv="3.342" forcerange="-7.0 7.0" />
+        <position class="servo" name="link2_servo" joint="link2" kp="29.75" kv="0.955" forcerange="-2.0 2.0" />
+        <position class="servo" name="act_servo"   joint="act"   kp="24.58" kv="0.143" forcerange="-0.3 0.3" />
     </actuator>
 </mujoco>
