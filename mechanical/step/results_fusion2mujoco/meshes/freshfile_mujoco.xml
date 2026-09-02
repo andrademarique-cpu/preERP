@@ -1,0 +1,59 @@
+<!-- Generated using Fusion2Mujoco v1.0 -->
+<!-- https://github.com/jgillick/Fusion2Mujoco -->
+<mujoco model="freshfile_mujoco">
+    <compiler angle="radian" />
+    <default>
+        <mesh scale="0.001 0.001 0.001" />
+        <geom contype="0" conaffinity="0" />
+        <!-- Servo de posicion: PD interno (kp/kv), recorrido +-90 deg, par tope 3 N*m. -->
+        <default class="servo">
+            <position kp="50" kv="2" forcerange="-30 30" />
+        </default>
+    </default>
+    <custom>
+        <numeric name="ground_offset" data="0.06052" />
+    </custom>
+    <asset>
+        <mesh name="base_link_visual" file="meshes\base_link\visual.stl" />
+        <mesh name="rot_visual" file="meshes\rot\visual.stl" />
+        <mesh name="link1_visual" file="meshes\link1\visual.stl" />
+        <mesh name="link2_visual" file="meshes\link2\visual.stl" />
+        <mesh name="act_visual" file="meshes\act\visual.stl" />
+    </asset>
+    <worldbody>
+        <!-- Lowest point of the model is at z = -0.06052m in this frame. -->
+        <!-- Lift the model by 0.06052m to rest it on a z=0 ground plane. -->
+        <!-- See <custom><numeric name="ground_offset">. -->
+        <body name="base_link" pos="0.0 0.0 0.0" quat="1.0 0.0 0.0 0.0">
+        
+            <geom mesh="base_link_visual" name="base_link_base_link_visual_geom" type="mesh" pos="0 0 0" quat="1 0 0 0" />
+            <inertial mass="1.0930923393163645" pos="0.00024462314778673805 0.0006690500618988771 0.02290157467175394" fullinertia="0.0017005338548396957 0.0014762407430690622 0.0021788492161598783 1.905547468557413e-05 -2.2913816991537657e-07 9.816075679626869e-05" />
+            <body name="rot" pos="-3.1086244689504386e-17 5.556241594988076e-06 0.0735" quat="0.7071067811865459 0.7071067811865529 -4.1528269195552e-15 -6.9726111936842135e-31">
+                <joint type="hinge" name="rot" axis="0 1 0" pos="0 0 0" />
+                <geom mesh="rot_visual" name="rot_rot_visual_geom" type="mesh" pos="0 0 0" quat="1 0 0 0" />
+                <inertial mass="0.6513790826917025" pos="4.211396519466115e-06 0.01599668146886204 0.001519630962492326" fullinertia="0.0008429237122873985 0.0008687581050695638 0.0005502496828729711 -1.1533082162206038e-07 -7.507101269829883e-08 -3.310818601251906e-05" />
+                <body name="link1" pos="-4.755362770225758e-16 0.04100000000000125 0.0009999999999997019" quat="1.0504242366510014e-16 1.0000000000000009 2.854070913908204e-16 7.465399472589413e-16">
+                    <joint type="hinge" name="link1" axis="-3.0751477046087446e-15 -1.8143235101006003e-16 1.0000000000000047" pos="5.998805101385686e-16 1.6705959946049194e-15 -0.02899955624159541" />
+                    <geom mesh="link1_visual" name="link1_link1_visual_geom" type="mesh" pos="0 0 0" quat="1 0 0 0" />
+                    <inertial mass="0.6543664159166849" pos="-0.0055962362836764175 0.045773016186252395 -0.0004119362247187982" fullinertia="0.0025224176494608613 0.0007927293932605964 0.002612087455877005 9.183315761261789e-05 -3.499115142600301e-06 -5.9794587951350994e-05" />
+                    <body name="link2" pos="5.728178688193341e-17 -1.4210854715202004e-16 -0.001000000000000197" quat="1.0000000000000002 2.348272958603207e-16 -1.5994139537407975e-16 6.773486636118863e-17">
+                        <joint type="hinge" name="link2" axis="-2.435382123112432e-15 4.2480992504367593e-16 1.0000000000000033" pos="-4.831422352034798e-16 0.13000000000000397 -0.022999556241595186" />
+                        <geom mesh="link2_visual" name="link2_link2_visual_geom" type="mesh" pos="0 0 0" quat="1 0 0 0" />
+                        <inertial mass="0.8817118285851836" pos="0.004638108223238173 0.09805031325905346 0.0009433839620963128" fullinertia="0.0021655280858433063 0.000631850057689626 0.0023202343800509005 0.00021310781788169532 6.003389659241344e-06 -2.8741024261877414e-05" />
+                        <body name="act" pos="0.026999999999950904 -0.03071113097705883 0.004499999999999611" quat="-1.5014009136163633e-15 0.7071067811865472 7.225793687845607e-17 0.7071067811865471">
+                            <joint type="hinge" name="act" axis="-1.0000000000000033 4.6714129942349195e-15 4.0116945295628215e-15" pos="0.016500443758405318 -0.03071113097706184 -0.02699999999995022" />
+                            <geom mesh="act_visual" name="act_act_visual_geom" type="mesh" pos="0 0 0" quat="1 0 0 0" />
+                            <inertial mass="0.17671625983548697" pos="-5.374644200288118e-08 -0.003980174988289031 -0.02513803373661391" fullinertia="8.178233267531608e-05 6.340204872699584e-05 5.951826260081763e-05 1.0230305878951857e-10 1.6329929906917458e-11 2.448271609273085e-06" />
+                        </body>
+                    </body>
+                </body>
+            </body>
+        </body>
+    </worldbody>
+    <actuator>
+        <position class="servo" name="rot_servo" joint="rot" />
+        <position class="servo" name="link1_servo" joint="link1" />
+        <position class="servo" name="link2_servo" joint="link2" />
+        <position class="servo" name="act_servo" joint="act" />
+    </actuator>
+</mujoco>
