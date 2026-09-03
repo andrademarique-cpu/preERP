@@ -1,0 +1,96 @@
+<!-- Indicador visual de ejes XYZ (triada RGB) para marcar sitios de sensores.
+
+     PARA QUE SIRVE
+     MuJoCo mide los sensores de marco (accelerometer, gyro, framepos...) en el
+     MARCO DEL SITE, no en el del mundo. La orientacion de ese marco la hereda el
+     site de su body salvo que lleve quat propio, asi que es facil montar un IMU
+     con un eje girado y no enterarse: un eje mal puesto es indistinguible de un
+     sesgo en el filtro. Esta triada dibuja X=rojo, Y=verde, Z=azul EN EL MISMO
+     marco que va a leer el sensor, de modo que el error se ve en el visor en vez
+     de aparecer despues como sesgo.
+
+     PROPIEDADES (las dos que pidio el encargo)
+     - SIN MASA:    cada geom lleva mass="0", asi que no aporta masa ni inercia al
+                    body que la hospeda. El body de la triada no lleva joint, o sea
+                    que esta soldado al padre y no anade grados de libertad; su masa
+                    cero no toca el arbol de inercia. NO le pongas un joint.
+     - SIN CONTACTO: contype="0" conaffinity="0" en la clase base. No hereda del
+                    <default> del modelo anfitrion a proposito: asi el archivo
+                    sigue siendo inocuo si se incluye en un modelo que SI tenga
+                    colisiones activadas.
+     - group="2":   se apaga/enciende con la tecla 2 en el visor sin tocar el XML.
+
+     DIMENSIONES (tomadas de MyPalletizer260/MyPalletizer260.xml)
+     Las escalas del brazo que importan: link2 mide 0.130 m entre juntas, link1
+     0.041 m hasta el eje siguiente, la base levanta 0.0735 m y el offset de act
+     es 0.030 m. Con eso:
+       LARGO  0.030 m  -> 23% de link2 y del orden del eslabon mas corto: se ve el
+                          sentido de cada eje sin tapar la malla ni salirse del
+                          cuerpo en las juntas pequenas (act, rot).
+       RADIO  0.0012 m -> 4% del largo; el asta se lee como linea, no como barra.
+       PUNTA  0.0025 m -> esfera al final del asta. MuJoCo no tiene primitiva de
+                          cono ni de flecha para geoms de usuario (solo plane,
+                          hfield, sphere, capsule, ellipsoid, cylinder, box, mesh),
+                          asi que la esfera es la que marca el sentido POSITIVO.
+                          Sin ella la triada es ambigua: +X y -X se dibujan igual.
+       ORIGEN 0.0030 m -> esfera gris en el origen del site.
+
+     USO
+     1) Incluir las clases DENTRO del bloque <default> del modelo anfitrion:
+
+          <default>
+              ...lo que ya tengas...
+              <include file="../axis_xyz.xml" />
+          </default>
+
+        (ruta relativa al XML que hace el include; desde MyPalletizer260/ es
+        "../axis_xyz.xml"). Va dentro de <default> porque este archivo aporta
+        SOLO clases; MJCF admite un unico <default> de nivel superior.
+
+     2) Pegar la triada como hijo del MISMO body que hospeda el site, copiando
+        pos y quat del site tal cual. Si el site es "link1_site" pos="0 0 0":
+
+          <site name="link1_site" pos="0 0 0" />
+          <body name="link1_axes" pos="0 0 0" quat="1 0 0 0">
+              <geom class="axis_o" />
+              <geom class="axis_x" /> <geom class="axis_x_tip" />
+              <geom class="axis_y" /> <geom class="axis_y_tip" />
+              <geom class="axis_z" /> <geom class="axis_z_tip" />
+          </body>
+
+        El pos/quat del BODY es lo unico que hay que tocar: la geometria de los
+        seis geoms ya vive en las clases. Si copias otro pos/quat que el del site
+        la triada miente, que es justo lo que este archivo intenta evitar. -->
+<mujocoinclude>
+    <default class="axis_ind">
+        <!-- fromto/size no se pueden heredar de una clase padre por geoms de tipo
+             distinto (la esfera de la punta ignora fromto), por eso cada eje trae
+             su propia clase hoja con la geometria ya resuelta. -->
+        <geom type="cylinder" contype="0" conaffinity="0" mass="0" group="2" />
+
+        <default class="axis_o">
+            <geom type="sphere" size="0.0030" pos="0 0 0" rgba="0.75 0.75 0.75 1" />
+        </default>
+
+        <default class="axis_x">
+            <geom fromto="0 0 0 0.030 0 0" size="0.0012" rgba="0.90 0.10 0.10 1" />
+        </default>
+        <default class="axis_x_tip">
+            <geom type="sphere" size="0.0025" pos="0.030 0 0" rgba="0.90 0.10 0.10 1" />
+        </default>
+
+        <default class="axis_y">
+            <geom fromto="0 0 0 0 0.030 0" size="0.0012" rgba="0.10 0.75 0.10 1" />
+        </default>
+        <default class="axis_y_tip">
+            <geom type="sphere" size="0.0025" pos="0 0.030 0" rgba="0.10 0.75 0.10 1" />
+        </default>
+
+        <default class="axis_z">
+            <geom fromto="0 0 0 0 0 0.030" size="0.0012" rgba="0.15 0.35 0.95 1" />
+        </default>
+        <default class="axis_z_tip">
+            <geom type="sphere" size="0.0025" pos="0 0 0.030" rgba="0.15 0.35 0.95 1" />
+        </default>
+    </default>
+</mujocoinclude>

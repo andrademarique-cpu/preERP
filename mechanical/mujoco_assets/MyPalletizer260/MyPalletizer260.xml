@@ -1,26 +1,16 @@
 <!-- Generated using Fusion2Mujoco v1.0 -->
 <!-- https://github.com/jgillick/Fusion2Mujoco -->
+<!-- initialize in the home keyframe for the initial position-->
 <mujoco model="freshfile_mujoco">
     <compiler angle="radian" />
     <default>
         <mesh scale="0.001 0.001 0.001" />
         <geom contype="0" conaffinity="0" />
-        <!-- Servos de posicion. La clase solo lleva lo que de verdad comparten:
-             kp/kv/forcerange van POR JUNTA, abajo en <actuator>.
 
-             Compartir una sola clase era el bug. Las cuatro juntas difieren por
-             48x en par de gravedad y 200x en inercia, y kp=50 / forcerange=30
-             para todas metia a `act` en chattering: pedia 30 N*m para sostener
-             una junta cuya carga de gravedad es 0.046 N*m. Saturado,
-             d(fuerza)/d(vel) = 0, implicitfast pierde su termino implicito, el
-             integrador degenera a explicito y kv*dt/M = 19.2 (limite: 2).
-
-             ctrlrange esta en RADIANES (compiler angle="radian") y es el setpoint
-             de posicion. Sin el, ctrllimited queda en false y los sliders del
-             visor caen al rango por defecto -1..1; ese +-1 no viene de la fisica. -->
         <default class="servo">
             <position ctrlrange="-3.14 3.14" />
         </default>
+        <include file="../axis_xyz.xml" />
     </default>
     <custom>
         <numeric name="ground_offset" data="0.06052" />
@@ -33,31 +23,52 @@
         <mesh name="act_visual" file="meshes\act\visual.stl" />
     </asset>
     <worldbody>
-        <!-- Lowest point of the model is at z = -0.06052m in this frame. -->
-        <!-- Lift the model by 0.06052m to rest it on a z=0 ground plane. -->
-        <!-- See <custom><numeric name="ground_offset">. -->
         <body name="base_link" pos="0.0 0.0 0.0" quat="1.0 0.0 0.0 0.0">
             <geom mesh="base_link_visual" name="base_link_visual_geom" type="mesh" pos="0 0 0" quat="1 0 0 0" />
             <inertial mass="0.30634434987210224" pos="0.0002446231477867381 0.0006690500618988766 0.02290157467175394" fullinertia="0.00047658273638819513 0.0004137235203505653 0.00061063290134417 5.34038780996982e-06 -6.421706672787577e-08 2.7510021012967027e-05" />
             <body name="rot" pos="-3.1086244689504386e-17 5.556241594988076e-06 0.0735" quat="0.7071067811865459 0.7071067811865529 -4.1528269195552e-15 -6.9726111936842135e-31">
-                <joint type="hinge" name="rot" axis="0 1 0" pos="0 0 0" />
+                <joint type="hinge" name="rot" axis="0 1 0" pos="0 0 0" ref="-1.57"/>
                 <geom mesh="rot_visual" name="rot_visual_geom" type="mesh" pos="0 0 0" quat="1 0 0 0" />
                 <inertial mass="0.18255209960786575" pos="4.211396519466115e-06 0.01599668146886204 0.0015196309624923255" fullinertia="0.0002362333970741755 0.00024347360906408163 0.0001542101022064375 -3.2322013702997824e-08 -2.103900992818567e-08 -9.278727290132735e-06" />
                 <body name="link1" pos="-2.7665369994878912e-17 0.04100000000000025 -0.000250000000000129" quat="1.0504242366510109e-16 1.0000000000000009 2.854070913908201e-16 7.465399472589408e-16">
-                    <joint type="hinge" name="link1" axis="-3.0751477046087434e-15 -1.814323510100624e-16 1.0000000000000047" pos="1.507534507222768e-16 6.716220628810269e-16 -0.03024955624159525" />
+                    <joint type="hinge" name="link1" axis="-3.0751477046087434e-15 -1.814323510100624e-16 1.0000000000000047" pos="1.507534507222768e-16 6.716220628810269e-16 -0.03024955624159525" ref="3.14"/>
                     <geom mesh="link1_visual" name="link1_visual_geom" type="mesh" pos="0 0 0" quat="1 0 0 0" />
                     <inertial mass="0.18338931401486716" pos="-0.0055962362836764175 0.045773016186252395 -0.0004119362247187983" fullinertia="0.000706919596027248 0.00022216619938513537 0.0007320499876343203 2.5736681114364273e-05 -9.806437342319314e-07 -1.67577189163022e-05" />
                     <site name="link1_site" pos="0 0 0" />
+                    <!-- Triada de ejes de "link1_site". pos/quat copiados del site: si dejan de
+                         coincidir, el dibujo miente sobre el marco en que mide el sensor. -->
+                    <body name="link1_site_axes" pos="0 0 0" quat="1 0 0 0">
+                        <geom class="axis_o" />
+                        <geom class="axis_x" /> <geom class="axis_x_tip" />
+                        <geom class="axis_y" /> <geom class="axis_y_tip" />
+                        <geom class="axis_z" /> <geom class="axis_z_tip" />
+                    </body>
                     <body name="link2" pos="5.773159728050918e-17 -1.9539925233402755e-16 -6.994405055138486e-17" quat="1.0000000000000002 6.829384216654346e-17 -1.5994139537408133e-16 6.773486636119297e-17">
-                        <joint type="hinge" name="link2" axis="-2.4353821231124256e-15 9.17430176561132e-17 1.0000000000000033" pos="-9.381187392259198e-16 0.13000000000000303 -0.02399955624159511" />
+                        <joint type="hinge" name="link2" axis="-2.4353821231124256e-15 9.17430176561132e-17 1.0000000000000033" pos="-9.381187392259198e-16 0.13000000000000303 -0.02399955624159511" ref="-1.57"/>
                         <geom mesh="link2_visual" name="link2_visual_geom" type="mesh" pos="0 0 0" quat="1 0 0 0" />
                         <inertial mass="0.24710395196017892" pos="0.004638108223238173 0.09805031325905346 0.0009433839620963126" fullinertia="0.0006068995909369788 0.00017707899705951313 0.0006502567689314627 5.972448399232229e-05 1.6824786306154092e-06 -8.054809347277741e-06" />
                         <site name="link2_site" pos="0 0 0" />
+                        <!-- Triada de ejes de "link2_site". pos/quat copiados del site: si dejan de
+                             coincidir, el dibujo miente sobre el marco en que mide el sensor. -->
+                        <body name="link2_site_axes" pos="0 0 0" quat="1 0 0 0">
+                            <geom class="axis_o" />
+                            <geom class="axis_x" /> <geom class="axis_x_tip" />
+                            <geom class="axis_y" /> <geom class="axis_y_tip" />
+                            <geom class="axis_z" /> <geom class="axis_z_tip" />
+                        </body>
                         <body name="act" pos="0.026999999999950237 -0.030711130977059912 0.00049999999999963" quat="-1.5014009136163622e-15 0.7071067811865472 7.225793687845428e-17 0.7071067811865471">
-                            <joint type="hinge" name="act" axis="-1.0000000000000033 4.3383460868473575e-15 4.011694529562818e-15" pos="0.020500443758405366 -0.03071113097706199 -0.026999999999950015" />
+                            <joint type="hinge" name="act" axis="-1.0000000000000033 4.3383460868473575e-15 4.011694529562818e-15" pos="0.020500443758405366 -0.03071113097706199 -0.026999999999950015" ref="-1.57" />
                             <geom mesh="act_visual" name="act_visual_geom" type="mesh" pos="0 0 0" quat="1 0 0 0" />
                             <inertial mass="0.04952557600484987" pos="-5.374644200252696e-08 -0.003980174988289049 -0.025138033736613902" fullinertia="2.2919889412190254e-05 1.776872703176954e-05 1.6680277416789325e-05 2.8670920934485726e-11 4.576540865670518e-12 6.861398140637994e-07" />
                             <site name="efector" pos="0 0 0" />
+                            <!-- Triada de ejes de "efector". pos/quat copiados del site: si dejan de
+                                 coincidir, el dibujo miente sobre el marco en que mide el sensor. -->
+                            <body name="efector_axes" pos="0 0 0" quat="1 0 0 0">
+                                <geom class="axis_o" />
+                                <geom class="axis_x" /> <geom class="axis_x_tip" />
+                                <geom class="axis_y" /> <geom class="axis_y_tip" />
+                                <geom class="axis_z" /> <geom class="axis_z_tip" />
+                            </body>
                         </body>
                     </body>
                 </body>
@@ -65,55 +76,32 @@
         </body>
     </worldbody>
     <actuator>
-        <!-- Dimensionado desde el UNICO dato de hardware que hay, v_max = 120 deg/s
-             = 2.094 rad/s, mas el par de gravedad medido sobre 13^4 poses:
-
-               forcerange ~ 3x el peor par de gravedad de esa junta
-               kv = forcerange / v_max   -> es la recta par-velocidad del motor
-                                            (par de bloqueo <-> velocidad sin carga)
-               kp = kv^2 / (4*M_max)     -> zeta = 1 en la pose menos amortiguada
-
-             Resultado (sobre el export de MyPalletizer260/, no este): kv*dt/M < 2
-             en las cuatro (0.40 / 0.44 / 0.37 / 1.37). Droop bajo gravedad:
-             0.00 / 1.98 / 1.06 / 0.11 deg.
-
-             OJO - un PD de posicion NO tiene techo de velocidad. Estas ganancias no
-             imponen los 120 deg/s: en un escalon de 90 deg el pico llega a ~1300
-             deg/s. El limite lo pone el limitador de CONSIGNA del notebook, que es
-             como lo hace un brazo real (generador de trayectoria -> servo).
-
-             SIN VERIFICAR EN ESTA VERSION: las posiciones/quats de cada body son
-             identicas, geometria a geometria, a las de MyPalletizer260/freshfile_
-             mujoco.xml, pero mass/fullinertia NO lo son: cada cuerpo aqui pesa
-             ~3.568x MENOS (misma proporcion en los cinco). Las ganancias de abajo
-             se portaron tal cual desde ese otro export sin re-correr la receta;
-             como M_max baja, kv*dt/M SUBE en la misma proporcion (p.ej. act pasaria
-             de 1.37 a ~4.9, por encima del limite de 2). Confirmar la fuente del
-             cambio de masa (material/densidad en Fusion, no geometria) y re-derivar
-             kp/kv/forcerange antes de confiar en la estabilidad de esta version.
-
-             joint    gravedad max    forcerange       kv       kp -->
         <position class="servo" name="rot_servo"   joint="rot"   kp="1.62"  kv="0.477" forcerange="-1.0 1.0" />
         <position class="servo" name="link1_servo" joint="link1" kp="63.35" kv="3.342" forcerange="-7.0 7.0" />
         <position class="servo" name="link2_servo" joint="link2" kp="29.75" kv="0.955" forcerange="-2.0 2.0" />
-        <position class="servo" name="act_servo"   joint="act"   kp="24.58" kv="0.143" forcerange="-0.3 0.3" />
+        <!-- position class="servo" name="act_servo"   joint="act"   kp="24.58" kv="0.143" forcerange="-0.3 0.3" -->
     </actuator>
     <sensor>
-        <!-- Acelerometros en link1 y link2. MuJoCo los mide en el MARCO DEL SITE,
-             no en el del mundo, y la salida INCLUYE la gravedad: en reposo leen
-             -R^T*g (~9.81 m/s2), igual que un acelerometro real. Restarla es
-             trabajo del modelo de medicion, no del XML.
-
-             La orientacion la hereda cada site de su body porque no llevan quat
-             propio. En cuanto pongas el site donde va el IMU fisico, el quat del
-             site es lo que fija los ejes del sensor - y un eje mal puesto aqui es
-             indistinguible de un sesgo en el filtro. -->
         <accelerometer name="link1_acc" site="link1_site" />
         <accelerometer name="link2_acc" site="link2_site" />
-
-        <!-- Posicion del efector en COORDENADAS DEL MUNDO (m). Sin reftype/refname
-             el marco de referencia es el mundo, que es el que corresponde al
-             offset de suelo de <custom>. -->
         <framepos name="efector_pos" objtype="site" objname="efector" />
     </sensor>
+    <equality>
+        <!-- Mantiene la longitud del tendón fija en su valor inicial -->
+        <tendon name="mantener_vertical" tendon1="acople_paletizador"/>
+    </equality>
+    <tendon>
+        <!-- Combina los ángulos de las 3 articulaciones responsables de la elevación -->
+        <fixed name="acople_paletizador">
+            <joint joint="link1" coef="1"/>
+            <joint joint="link2" coef="1"/>
+            <joint joint="act" coef="-1"/> 
+        </fixed>
+    </tendon>
+    <keyframe>
+        <!-- qpos/qvel llevan 4 (una por junta), ctrl solo 3: `act` no tiene
+             actuador, lo mueve el tendon. ctrl se dimensiona por nu, no por njnt. -->
+        <key name="home" qpos="0 0 0 0" qvel="0 0 0 0" ctrl="0 0 0" />
+    </keyframe>
+
 </mujoco>
