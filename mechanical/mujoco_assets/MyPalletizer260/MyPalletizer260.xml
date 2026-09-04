@@ -23,52 +23,46 @@
         <mesh name="act_visual" file="meshes\act\visual.stl" />
     </asset>
     <worldbody>
-        <body name="base_link" pos="0.0 0.0 0.0" quat="1.0 0.0 0.0 0.0">
+        <body name="base_link" pos="0 0 0" quat="1 0 0 0">
             <geom mesh="base_link_visual" name="base_link_visual_geom" type="mesh" pos="0 0 0" quat="1 0 0 0" />
-            <inertial mass="0.30634434987210224" pos="0.0002446231477867381 0.0006690500618988766 0.02290157467175394" fullinertia="0.00047658273638819513 0.0004137235203505653 0.00061063290134417 5.34038780996982e-06 -6.421706672787577e-08 2.7510021012967027e-05" />
-            <body name="rot" pos="-3.1086244689504386e-17 5.556241594988076e-06 0.0735" quat="0.7071067811865459 0.7071067811865529 -4.1528269195552e-15 -6.9726111936842135e-31">
-                <joint type="hinge" name="rot" axis="0 1 0" pos="0 0 0" ref="-1.57"/>
+            <inertial mass="0.306344" pos="0.000244623 0.000669050 0.022901575" fullinertia="4.76583e-4 4.13724e-4 6.10633e-4 5.34039e-6 -6.42171e-8 2.75100e-5" />
+            <body name="rot" pos="0 0.000005556 0.0735" quat="1 1 0 0">
+                <joint type="hinge" name="rot" axis="0 1 0" pos="0 0 0" ref="1.57" range="-2.79 2.79"/>
                 <geom mesh="rot_visual" name="rot_visual_geom" type="mesh" pos="0 0 0" quat="1 0 0 0" />
-                <inertial mass="0.18255209960786575" pos="4.211396519466115e-06 0.01599668146886204 0.0015196309624923255" fullinertia="0.0002362333970741755 0.00024347360906408163 0.0001542101022064375 -3.2322013702997824e-08 -2.103900992818567e-08 -9.278727290132735e-06" />
-                <body name="link1" pos="-2.7665369994878912e-17 0.04100000000000025 -0.000250000000000129" quat="1.0504242366510109e-16 1.0000000000000009 2.854070913908201e-16 7.465399472589408e-16">
-                    <joint type="hinge" name="link1" axis="-3.0751477046087434e-15 -1.814323510100624e-16 1.0000000000000047" pos="1.507534507222768e-16 6.716220628810269e-16 -0.03024955624159525" ref="3.14"/>
+                <inertial mass="0.182552" pos="0.000004211 0.015996681 0.001519631" fullinertia="2.36233e-4 2.43474e-4 1.54210e-4 -3.23220e-8 -2.10390e-8 -9.27873e-6" />
+                <body name="link1" pos="0 0.041 -0.00025" quat="0 1 0 0">
+                    <joint type="hinge" name="link1" axis="0 0 -1" pos="0 0 -0.030249556" ref="-3.1415" range="0 1.57"/>
                     <geom mesh="link1_visual" name="link1_visual_geom" type="mesh" pos="0 0 0" quat="1 0 0 0" />
-                    <inertial mass="0.18338931401486716" pos="-0.0055962362836764175 0.045773016186252395 -0.0004119362247187983" fullinertia="0.000706919596027248 0.00022216619938513537 0.0007320499876343203 2.5736681114364273e-05 -9.806437342319314e-07 -1.67577189163022e-05" />
-                    <site name="link1_site" pos="0 0 0" />
-                    <!-- Triada de ejes de "link1_site". pos/quat copiados del site: si dejan de
-                         coincidir, el dibujo miente sobre el marco en que mide el sensor. -->
-                    <body name="link1_site_axes" pos="0 0 0" quat="1 0 0 0">
+                    <inertial mass="0.183389" pos="-0.005596236 0.045773016 -0.000411936" fullinertia="7.06920e-4 2.22166e-4 7.32050e-4 2.57367e-5 -9.80644e-7 -1.67577e-5" />
+                    <frame name="link1_site_frame" pos="0 0.065 0" quat="1 0 0 0">
+                        <site name="link1_site" />
                         <geom class="axis_o" />
                         <geom class="axis_x" /> <geom class="axis_x_tip" />
                         <geom class="axis_y" /> <geom class="axis_y_tip" />
                         <geom class="axis_z" /> <geom class="axis_z_tip" />
-                    </body>
-                    <body name="link2" pos="5.773159728050918e-17 -1.9539925233402755e-16 -6.994405055138486e-17" quat="1.0000000000000002 6.829384216654346e-17 -1.5994139537408133e-16 6.773486636119297e-17">
-                        <joint type="hinge" name="link2" axis="-2.4353821231124256e-15 9.17430176561132e-17 1.0000000000000033" pos="-9.381187392259198e-16 0.13000000000000303 -0.02399955624159511" ref="-1.57"/>
+                    </frame>
+                    <body name="link2" pos="0 0 0" quat="1 0 0 0">
+                        <joint type="hinge" name="link2" axis="0 0 1" pos="0 0.13 -0.023999556" ref="-1.57" range="0 1.05"/>
                         <geom mesh="link2_visual" name="link2_visual_geom" type="mesh" pos="0 0 0" quat="1 0 0 0" />
-                        <inertial mass="0.24710395196017892" pos="0.004638108223238173 0.09805031325905346 0.0009433839620963126" fullinertia="0.0006068995909369788 0.00017707899705951313 0.0006502567689314627 5.972448399232229e-05 1.6824786306154092e-06 -8.054809347277741e-06" />
-                        <site name="link2_site" pos="0 0 0" />
-                        <!-- Triada de ejes de "link2_site". pos/quat copiados del site: si dejan de
-                             coincidir, el dibujo miente sobre el marco en que mide el sensor. -->
-                        <body name="link2_site_axes" pos="0 0 0" quat="1 0 0 0">
+                        <inertial mass="0.247104" pos="0.004638108 0.098050313 0.000943384" fullinertia="6.06900e-4 1.77079e-4 6.50257e-4 5.97245e-5 1.68248e-6 -8.05481e-6" />
+                        <frame name="link2_site_frame" pos="0 0 0" quat="1 0 0 0">
+                            <site name="link2_site" />
                             <geom class="axis_o" />
                             <geom class="axis_x" /> <geom class="axis_x_tip" />
                             <geom class="axis_y" /> <geom class="axis_y_tip" />
                             <geom class="axis_z" /> <geom class="axis_z_tip" />
-                        </body>
-                        <body name="act" pos="0.026999999999950237 -0.030711130977059912 0.00049999999999963" quat="-1.5014009136163622e-15 0.7071067811865472 7.225793687845428e-17 0.7071067811865471">
-                            <joint type="hinge" name="act" axis="-1.0000000000000033 4.3383460868473575e-15 4.011694529562818e-15" pos="0.020500443758405366 -0.03071113097706199 -0.026999999999950015" ref="-1.57" />
+                        </frame>
+                        <body name="act" pos="0.027 -0.030711131 0.0005" quat="0 1 0 1">
+                            <joint type="hinge" name="act" axis="-1 0 0" pos="0.020500444 -0.030711131 -0.027" ref="1.57" />
                             <geom mesh="act_visual" name="act_visual_geom" type="mesh" pos="0 0 0" quat="1 0 0 0" />
-                            <inertial mass="0.04952557600484987" pos="-5.374644200252696e-08 -0.003980174988289049 -0.025138033736613902" fullinertia="2.2919889412190254e-05 1.776872703176954e-05 1.6680277416789325e-05 2.8670920934485726e-11 4.576540865670518e-12 6.861398140637994e-07" />
-                            <site name="efector" pos="0 0 0" />
-                            <!-- Triada de ejes de "efector". pos/quat copiados del site: si dejan de
-                                 coincidir, el dibujo miente sobre el marco en que mide el sensor. -->
-                            <body name="efector_axes" pos="0 0 0" quat="1 0 0 0">
+                            <inertial mass="0.0495256" pos="-0.000000054 -0.003980175 -0.025138034" fullinertia="2.29199e-5 1.77687e-5 1.66803e-5 0 0 6.86140e-7" />
+                            <frame name="efector_frame" pos="0 0 0" quat="1 0 0 0">
+                                <site name="efector" />
                                 <geom class="axis_o" />
                                 <geom class="axis_x" /> <geom class="axis_x_tip" />
                                 <geom class="axis_y" /> <geom class="axis_y_tip" />
                                 <geom class="axis_z" /> <geom class="axis_z_tip" />
-                            </body>
+                            </frame>
                         </body>
                     </body>
                 </body>
@@ -76,10 +70,9 @@
         </body>
     </worldbody>
     <actuator>
-        <position class="servo" name="rot_servo"   joint="rot"   kp="1.62"  kv="0.477" forcerange="-1.0 1.0" />
-        <position class="servo" name="link1_servo" joint="link1" kp="63.35" kv="3.342" forcerange="-7.0 7.0" />
-        <position class="servo" name="link2_servo" joint="link2" kp="29.75" kv="0.955" forcerange="-2.0 2.0" />
-        <!-- position class="servo" name="act_servo"   joint="act"   kp="24.58" kv="0.143" forcerange="-0.3 0.3" -->
+        <position class="servo" name="rot_servo"   joint="rot"   kp="1.62"  kv="0.477" forcerange="-1.0 1.0" ctrlrange="-2.79 2.79"/>
+        <position class="servo" name="link1_servo" joint="link1" kp="63.35" kv="3.342" forcerange="-7.0 7.0" ctrlrange="0 1.57"/>
+        <position class="servo" name="link2_servo" joint="link2" kp="29.75" kv="0.955" forcerange="-2.0 2.0" ctrlrange="0 1.04"/>
     </actuator>
     <sensor>
         <accelerometer name="link1_acc" site="link1_site" />
@@ -87,20 +80,16 @@
         <framepos name="efector_pos" objtype="site" objname="efector" />
     </sensor>
     <equality>
-        <!-- Mantiene la longitud del tendón fija en su valor inicial -->
-        <tendon name="mantener_vertical" tendon1="acople_paletizador"/>
+        <tendon name="mantener_vertical" tendon1="acople_paletizador" polycoef="1.57 1 0 0 0"/>
     </equality>
     <tendon>
-        <!-- Combina los ángulos de las 3 articulaciones responsables de la elevación -->
         <fixed name="acople_paletizador">
             <joint joint="link1" coef="1"/>
-            <joint joint="link2" coef="1"/>
-            <joint joint="act" coef="-1"/> 
+            <joint joint="link2" coef="-1"/>
+            <joint joint="act" coef="1"/>
         </fixed>
     </tendon>
     <keyframe>
-        <!-- qpos/qvel llevan 4 (una por junta), ctrl solo 3: `act` no tiene
-             actuador, lo mueve el tendon. ctrl se dimensiona por nu, no por njnt. -->
         <key name="home" qpos="0 0 0 0" qvel="0 0 0 0" ctrl="0 0 0" />
     </keyframe>
 

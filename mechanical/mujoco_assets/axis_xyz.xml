@@ -11,9 +11,11 @@
 
      PROPIEDADES (las dos que pidio el encargo)
      - SIN MASA:    cada geom lleva mass="0", asi que no aporta masa ni inercia al
-                    body que la hospeda. El body de la triada no lleva joint, o sea
-                    que esta soldado al padre y no anade grados de libertad; su masa
-                    cero no toca el arbol de inercia. NO le pongas un joint.
+                    body que la hospeda. Como la triada se monta en un <frame> (ver
+                    USO) y un <frame> NO es un body, tampoco anade bodies ni grados
+                    de libertad: desaparece al compilar y los geoms quedan colgando
+                    del body anfitrion. Garantia mas fuerte que la del body vacio
+                    que se usaba antes.
      - SIN CONTACTO: contype="0" conaffinity="0" en la clase base. No hereda del
                     <default> del modelo anfitrion a proposito: asi el archivo
                     sigue siendo inocuo si se incluye en un modelo que SI tenga
@@ -47,20 +49,32 @@
         "../axis_xyz.xml"). Va dentro de <default> porque este archivo aporta
         SOLO clases; MJCF admite un unico <default> de nivel superior.
 
-     2) Pegar la triada como hijo del MISMO body que hospeda el site, copiando
-        pos y quat del site tal cual. Si el site es "link1_site" pos="0 0 0":
+     2) Meter el site Y la triada dentro de un mismo <frame>, y poner el pos/quat
+        SOLO en el frame:
 
-          <site name="link1_site" pos="0 0 0" />
-          <body name="link1_axes" pos="0 0 0" quat="1 0 0 0">
+          <frame name="link1_site_frame" pos="0 0 0" quat="1 0 0 0">
+              <site name="link1_site" />
               <geom class="axis_o" />
               <geom class="axis_x" /> <geom class="axis_x_tip" />
               <geom class="axis_y" /> <geom class="axis_y_tip" />
               <geom class="axis_z" /> <geom class="axis_z_tip" />
-          </body>
+          </frame>
 
-        El pos/quat del BODY es lo unico que hay que tocar: la geometria de los
-        seis geoms ya vive en las clases. Si copias otro pos/quat que el del site
-        la triada miente, que es justo lo que este archivo intenta evitar. -->
+        El pos/quat del FRAME es lo unico que hay que tocar: la geometria de los
+        seis geoms ya vive en las clases, y el site NO lleva pos ni quat propios.
+        Ese es todo el punto. Mover el frame mueve el site y su indicador juntos,
+        porque son el mismo marco: site_pos == geom_pos y site_quat == geom_quat
+        exactos, no aproximados.
+
+        POR QUE ASI Y NO CON UN BODY HERMANO. Antes esto se hacia pegando un
+        <body name="link1_axes"> al lado del site y COPIANDO a mano su pos/quat.
+        Eso escribe la pose dos veces, y lo que tiene que pasar paso: en
+        MyPalletizer260 el site se movio a pos="3 0 0" y la triada se quedo en el
+        origen, o sea que el indicador dejo de marcar donde mide link1_acc. Con
+        un solo <frame> no hay nada que mantener sincronizado.
+
+        NO le pongas pos/quat al <site> de adentro: se compone con el del frame y
+        separa el site de su propio indicador, que es el bug que esto elimina. -->
 <mujocoinclude>
     <default class="axis_ind">
         <!-- fromto/size no se pueden heredar de una clase padre por geoms de tipo
