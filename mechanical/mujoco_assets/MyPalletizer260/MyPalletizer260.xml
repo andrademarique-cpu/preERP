@@ -21,20 +21,28 @@
         <mesh name="link1_visual" file="meshes\link1\visual.stl" />
         <mesh name="link2_visual" file="meshes\link2\visual.stl" />
         <mesh name="act_visual" file="meshes\act\visual.stl" />
+        <!-- Un color por cuerpo. Los tonos se eligen fuera del rojo/verde/azul
+             saturados que usa la triada de ejes (../axis_xyz.xml) para que el
+             indicador de marco siga leyendose encima de la malla. -->
+        <material name="mat_base_link" rgba="0.25 0.28 0.33 1" specular="0.3" shininess="0.4" />
+        <material name="mat_rot"       rgba="0.95 0.55 0.10 1" specular="0.3" shininess="0.4" />
+        <material name="mat_link1"     rgba="0.10 0.65 0.70 1" specular="0.3" shininess="0.4" />
+        <material name="mat_link2"     rgba="0.60 0.30 0.80 1" specular="0.3" shininess="0.4" />
+        <material name="mat_act"       rgba="0.95 0.85 0.20 1" specular="0.3" shininess="0.4" />
     </asset>
     <worldbody>
         <body name="base_link" pos="0 0 0" quat="1 0 0 0">
-            <geom mesh="base_link_visual" name="base_link_visual_geom" type="mesh" pos="0 0 0" quat="1 0 0 0" />
+            <geom mesh="base_link_visual" name="base_link_visual_geom" type="mesh" material="mat_base_link" pos="0 0 0" quat="1 0 0 0" />
             <inertial mass="0.306344" pos="0.000244623 0.000669050 0.022901575" fullinertia="4.76583e-4 4.13724e-4 6.10633e-4 5.34039e-6 -6.42171e-8 2.75100e-5" />
             <body name="rot" pos="0 0.000005556 0.0735" quat="1 1 0 0">
                 <joint type="hinge" name="rot" axis="0 1 0" pos="0 0 0" ref="1.57" range="-2.79 2.79"/>
-                <geom mesh="rot_visual" name="rot_visual_geom" type="mesh" pos="0 0 0" quat="1 0 0 0" />
+                <geom mesh="rot_visual" name="rot_visual_geom" type="mesh" material="mat_rot" pos="0 0 0" quat="1 0 0 0" />
                 <inertial mass="0.182552" pos="0.000004211 0.015996681 0.001519631" fullinertia="2.36233e-4 2.43474e-4 1.54210e-4 -3.23220e-8 -2.10390e-8 -9.27873e-6" />
                 <body name="link1" pos="0 0.041 -0.00025" quat="0 1 0 0">
                     <joint type="hinge" name="link1" axis="0 0 -1" pos="0 0 -0.030249556" ref="-3.1415" range="0 1.57"/>
-                    <geom mesh="link1_visual" name="link1_visual_geom" type="mesh" pos="0 0 0" quat="1 0 0 0" />
+                    <geom mesh="link1_visual" name="link1_visual_geom" type="mesh" material="mat_link1" pos="0 0 0" quat="1 0 0 0" />
                     <inertial mass="0.183389" pos="-0.005596236 0.045773016 -0.000411936" fullinertia="7.06920e-4 2.22166e-4 7.32050e-4 2.57367e-5 -9.80644e-7 -1.67577e-5" />
-                    <frame name="link1_site_frame" pos="0 0.065 0" quat="1 0 0 0">
+                    <frame name="link1_site_frame" pos="-0.012 0.065 0.035" quat="1 0 0 0">
                         <site name="link1_site" />
                         <geom class="axis_o" />
                         <geom class="axis_x" /> <geom class="axis_x_tip" />
@@ -43,9 +51,9 @@
                     </frame>
                     <body name="link2" pos="0 0 0" quat="1 0 0 0">
                         <joint type="hinge" name="link2" axis="0 0 1" pos="0 0.13 -0.023999556" ref="-1.57" range="0 1.05"/>
-                        <geom mesh="link2_visual" name="link2_visual_geom" type="mesh" pos="0 0 0" quat="1 0 0 0" />
+                        <geom mesh="link2_visual" name="link2_visual_geom" type="mesh" material="mat_link2" pos="0 0 0" quat="1 0 0 0" />
                         <inertial mass="0.247104" pos="0.004638108 0.098050313 0.000943384" fullinertia="6.06900e-4 1.77079e-4 6.50257e-4 5.97245e-5 1.68248e-6 -8.05481e-6" />
-                        <frame name="link2_site_frame" pos="0 0 0" quat="1 0 0 0">
+                        <frame name="link2_site_frame" pos="0.015  0.06 0.035" quat="1 0 0 0">
                             <site name="link2_site" />
                             <geom class="axis_o" />
                             <geom class="axis_x" /> <geom class="axis_x_tip" />
@@ -54,9 +62,9 @@
                         </frame>
                         <body name="act" pos="0.027 -0.030711131 0.0005" quat="0 1 0 1">
                             <joint type="hinge" name="act" axis="-1 0 0" pos="0.020500444 -0.030711131 -0.027" ref="1.57" />
-                            <geom mesh="act_visual" name="act_visual_geom" type="mesh" pos="0 0 0" quat="1 0 0 0" />
+                            <geom mesh="act_visual" name="act_visual_geom" type="mesh" material="mat_act" pos="0 0 0" quat="1 0 0 0" />
                             <inertial mass="0.0495256" pos="-0.000000054 -0.003980175 -0.025138034" fullinertia="2.29199e-5 1.77687e-5 1.66803e-5 0 0 6.86140e-7" />
-                            <frame name="efector_frame" pos="0 0 0" quat="1 0 0 0">
+                            <frame name="efector_frame" pos="0 0.003 -0.05" quat="1 0 0 0">
                                 <site name="efector" />
                                 <geom class="axis_o" />
                                 <geom class="axis_x" /> <geom class="axis_x_tip" />
