@@ -87,6 +87,8 @@
     <sensor>
         <accelerometer name="link1_acc" site="link1_site" />
         <accelerometer name="link2_acc" site="link2_site" />
+        <gyro name="link1_gyro" site="link1_site" />
+        <gyro name="link2_gyro" site="link2_site" />
         <framepos name="efector_pos" objtype="site" objname="efector" />
     </sensor>
 
