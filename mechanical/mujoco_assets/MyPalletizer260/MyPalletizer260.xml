@@ -52,7 +52,7 @@
                         <geom class="axis_z" /> <geom class="axis_z_tip" />
                     </frame>
                     <body name="link2" pos="0 0 0" quat="1 0 0 0">
-                        <joint type="hinge" name="link2" axis="0 0 1" pos="0 0.13 -0.023999556" ref="-1.57" range="0 1.05"/>
+                        <joint type="hinge" name="link2" axis="0 0 -1" pos="0 0.13 -0.023999556" ref="1.57" range="0 1.05"/>
                         <geom mesh="link2_visual" name="link2_visual_geom" type="mesh" material="mat_link2" pos="0 0 0" quat="1 0 0 0" />
                         <inertial mass="0.247104" pos="0.004638108 0.098050313 0.000943384" fullinertia="6.06900e-4 1.77079e-4 6.50257e-4 5.97245e-5 1.68248e-6 -8.05481e-6" />
                         <frame name="link2_site_frame" pos="0.015  0.06 0.035" quat="1 0 0 0">
@@ -80,27 +80,33 @@
         </body>
     </worldbody>
     <actuator>
-        <position name="rot_servo"   joint="rot"   kp="1.62"  kv="0.477" forcerange="-4.0 4.0" ctrlrange="-2.79 2.79"/>
-        <position name="link1_servo" joint="link1" kp="63.35" kv="3.342" forcerange="-7.0 7.0" ctrlrange="0 1.57"/>
-        <position name="link2_servo" joint="link2" kp="29.75" kv="0.955" forcerange="-2.0 2.0" ctrlrange="0 1.04"/>
+        <position name="rot_servo"   joint="rot"   kp="10"  kv="0.477" forcerange="-4.0 4.0" ctrlrange="-2.79 2.79"/>
+        <position name="link1_servo" joint="link1" kp="80" kv="3.342" forcerange="-7.0 7.0" ctrlrange="0 1.57"/>
+        <position name="link2_servo" joint="link2" kp="40" kv="0.955" forcerange="-2.0 2.0" ctrlrange="0 1.04"/>
     </actuator>
     <sensor>
         <accelerometer name="link1_acc" site="link1_site" />
         <accelerometer name="link2_acc" site="link2_site" />
         <framepos name="efector_pos" objtype="site" objname="efector" />
     </sensor>
+
     <equality>
-        <tendon name="mantener_vertical" tendon1="acople_paletizador" polycoef="1.57 1 0 0 0"/>
+        <tendon name="mantener_vertical" tendon1="acople_paletizador"
+                polycoef="1.5707963 1 0 0 0"
+                solref="0.004 1" solimp="0.99 0.9999 0.001 0.5 2"/>
     </equality>
     <tendon>
         <fixed name="acople_paletizador">
             <joint joint="link1" coef="1"/>
-            <joint joint="link2" coef="-1"/>
+            <joint joint="link2" coef="1"/>
             <joint joint="act" coef="1"/>
         </fixed>
     </tendon>
+    <!-- act = 1.5693, no 1.57: es el valor que satisface la igualdad de arriba
+         EXACTO (q1+q2+qa = L0 + a0 = 1.5693), asi el arranque no tiene un
+         empujon del solver en el primer paso. -->
     <keyframe>
-        <key name="home" qpos="0 0 0 1.57" qvel="0 0 0 0" ctrl="0 0 0" />
+        <key name="home" qpos="0 0 0 1.5693" qvel="0 0 0 0" ctrl="0 0 0" />
     </keyframe>
 
 </mujoco>
