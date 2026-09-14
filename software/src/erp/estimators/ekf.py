@@ -1,81 +1,56 @@
-"""Extended Kalman filter with Joseph-form covariance update."""
-
-from __future__ import annotations
-
+# software/src/erp/estimators/ekf.py
+import mujoco as mj
 import numpy as np
 
-from erp.core.linalg import mahalanobis, make_spd
-from erp.core.types import Array, GaussianState, Measurement
-from erp.estimators.base import StateEstimator
-from erp.models.base import MeasurementModel, ProcessModel
-
-__all__ = ["ExtendedKalmanFilter"]
+from erp.core.linalg import make_spd
+from erp.sim.mujoco import F_dyn, H_dyn, f_dyn, h_dyn
 
 
-class ExtendedKalmanFilter(StateEstimator):
-    """EKF over an arbitrary :class:`~erp.models.base.ProcessModel`.
+class EKF:
+    """EKF con f/F/h/H de MuJoCo. Update en forma de Joseph. CIEGO al control.
 
-    Handed a linear process and measurement model this reduces exactly to the
-    standard Kalman filter, so the linear case needs no separate class.
+    El filtro nunca recibe u. `self.u_blind` es el UNICO ctrl que escribe -- se
+    aloca una vez, en cero, y va a f, F, h y H por igual, asi que las cuatro
+    funciones dependen solo del estado. No hay forma de pasarle un control: los
+    metodos no tienen el parametro.
 
-    Two numerical choices are load-bearing rather than stylistic:
+    Que eso sea sano o no depende enteramente del modelo que se le pase:
+    model_blind deja la activacion como random walk, model_sim la decae a cero.
 
-    * **Joseph form** for the covariance update, which stays symmetric
-      positive semi-definite under the round-off that the plain
-      ``(I - KH) P`` form does not survive here.
-    * **Eigenvalue flooring** via :func:`~erp.core.linalg.make_spd` after every
-      operation on ``P``. Without it the NEES goes negative and the consistency
-      diagnostic fails silently.
+    x0 : (nx,) estado inicial       P0 : (nx,nx) covarianza inicial
+    Q  : (nx,nx) ruido de proceso   R  : (ns,ns) ruido de medicion, sensordata COMPLETA
     """
 
-    def __init__(self, process_model: ProcessModel, initial: GaussianState) -> None:
-        super().__init__(process_model, initial)
-        self._state.P = make_spd(self._state.P)
-        self._last_innovation: Array | None = None
-        self._last_nis: float | None = None
+    def __init__(self, x0: np.ndarray, P0: np.ndarray, Q: np.ndarray, R: np.ndarray,
+                 model: mj.MjModel, data: mj.MjData) -> None:
+        self.x = np.asarray(x0, float).copy()
+        self.P = make_spd(np.asarray(P0, float))
+        self.Q = np.asarray(Q, float)
+        self.R = np.asarray(R, float)
+        self.model, self.data = model, data
+        self.u_blind = np.zeros(model.nu)   # el unico ctrl que ve el filtro
 
-    @property
-    def last_innovation(self) -> Array | None:
-        """Innovation ``z - h(x, u)`` from the most recent update, or ``None``.
+    def predict(self) -> None:
+        """t_k -> t_{k+1}, un paso de model.opt.timestep."""
+        u = self.u_blind
+        F = F_dyn(self.x, u, self.model, self.data)
+        self.x = f_dyn(self.x, u, self.model, self.data)
+        self.P = make_spd(F @ self.P @ F.T + self.Q)
 
-        Units are the measuring sensor's own.
+    def update(self, z: np.ndarray, rows: np.ndarray) -> tuple[np.ndarray, float]:
+        """Corrige con los canales `rows` de la medicion z (sensordata completa).
+        -> (innovacion, NIS).
+
+        solve y no inv: S se pone mal condicionada cuando el dedo se estira.
+        Joseph y no (I-KH)P: sobrevive el redondeo que la forma corta no.
         """
-        return self._last_innovation
-
-    @property
-    def last_nis(self) -> float | None:
-        """NIS of the most recent update, or ``None`` before the first.
-
-        Chi-squared with ``dim(z)`` degrees of freedom when the filter is
-        consistent. This is the diagnostic that survives onto hardware, since
-        it needs no ground truth.
-        """
-        return self._last_nis
-
-    def predict(self, u: Array, dt: float) -> None:
-        """Advance the belief by ``dt`` seconds under constant input ``u``."""
-        if dt <= 0.0:
-            raise ValueError(f"dt must be > 0, got {dt}")
-        model = self._process_model
-        x, P = self._state.x, self._state.P
-        F = model.jacobian(x, u, dt)
-        self._state.x = model.predict(x, u, dt)
-        self._state.P = make_spd(F @ P @ F.T + model.Q(dt))
-
-    def update(self, m: Measurement, model: MeasurementModel, u: Array) -> None:
-        """Fold in measurement ``m``, taken under input ``u``."""
-        x, P = self._state.x, self._state.P
-        H = model.jacobian(x, u)
-        y = m.z - model.h(x, u)
-        R = model.R if m.R is None else m.R
-        if y.shape != (H.shape[0],):
-            raise ValueError(f"measurement has size {y.shape}, model expects ({H.shape[0]},)")
-
-        S = make_spd(H @ P @ H.T + R)
-        K = np.linalg.solve(S, H @ P).T          # P H^T S^-1, without forming S^-1
-        self._state.x = x + K @ y
-        I_KH = np.eye(x.size) - K @ H
-        self._state.P = make_spd(I_KH @ P @ I_KH.T + K @ R @ K.T)
-
-        self._last_innovation = y
-        self._last_nis = mahalanobis(y, S)
+        u = self.u_blind
+        H = H_dyn(self.x, u, self.model, self.data)[rows]
+        y = z[rows] - h_dyn(self.x, u, self.model, self.data)[rows]
+        R = self.R[np.ix_(rows, rows)]
+        S = make_spd(H @ self.P @ H.T + R)
+        K = np.linalg.solve(S, H @ self.P).T          # = P H^T S^-1
+        self.x = self.x + K @ y
+        I_KH = np.eye(self.x.size) - K @ H
+        self.P = make_spd(I_KH @ self.P @ I_KH.T + K @ R @ K.T)
+        return y, float(y @ np.linalg.solve(S, y))

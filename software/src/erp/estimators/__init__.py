@@ -1,6 +1,5 @@
-"""State estimators. No hardware imports, ever."""
+"""State estimators. Built on sim/ and core/; nothing below imports this package."""
 
-from erp.estimators.base import StateEstimator
-from erp.estimators.ekf import ExtendedKalmanFilter
+from erp.estimators.ekf import EKF
 
-__all__ = ["ExtendedKalmanFilter", "StateEstimator"]
+__all__ = ["EKF"]
