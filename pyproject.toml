@@ -62,6 +62,13 @@ mypy_path = "software/src"
 module = "scipy.*"
 ignore_missing_imports = true
 
+# pyserial ships no stubs and is only in the [app] extra (absent in CI). It is
+# imported lazily inside SerialIMUSensor._open, which assigns the port to a
+# LineTransport-typed attribute, so no Any escapes into the sensor code.
+[[tool.mypy.overrides]]
+module = ["serial", "serial.*"]
+ignore_missing_imports = true
+
 [tool.ruff]
 line-length = 100
 src = ["software/src"]

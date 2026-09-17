@@ -57,6 +57,51 @@ joints:
 # See ADR-0001 sections 2.1 and 3 (D3).
 
 sensors:
+  # MyPalletizer260: two IMUs streamed by a Teensy 3.6 over USB serial.
+  # erp.sensors.SerialIMUSensor + IMUDecoder. No loader reads this file yet;
+  # notebooks/mypalletizer260EKF.ipynb mirrors these values by hand.
+  palletizer_imu:
+    type: SerialIMUSensor
+    device: teensy36
+    port: COM7
+    baudrate: 115200            # ignored by Teensy USB serial (always full-speed USB)
+    format: kv                  # "kv" = IMU_0.ax:-9.71 ... ; "csv" = t_dev,v0..v11 (preferred)
+    # Clock: the firmware sends no timestamp yet, so samples are stamped on
+    # arrival minus latency_s (bias removed, jitter kept). Once lines carry
+    # micros(), switch to clock: sync with device_scale 1.0e-6.
+    clock: arrival              # arrival | sync
+    latency_s: 0.0              # s, sample -> host arrival. TODO: unmeasured
+    device_scale: 1.0e-6        # s per device tick (micros)
+    clock_window_s: 2.0         # s, ClockSync minimum window
+    buffer_len: 4096            # samples held between drains
+    rate_hz: 20                 # measured on data/raw/imu_trajectory_log.csv (50 +- 1 ms)
+    keys: [IMU_0.ax, IMU_0.ay, IMU_0.az, IMU_1.ax, IMU_1.ay, IMU_1.az,
+           IMU_0.wx, IMU_0.wy, IMU_0.wz, IMU_1.wx, IMU_1.wy, IMU_1.wz]
+    # MuJoCo sensor name -> device channels. IMU_0 is on link1, IMU_1 on link2.
+    # Order must match rows_of(model, *layout), i.e. the XML <sensor> block.
+    layout:
+      link1_acc:  [IMU_0.ax, IMU_0.ay, IMU_0.az]
+      link2_acc:  [IMU_1.ax, IMU_1.ay, IMU_1.az]
+      link1_gyro: [IMU_0.wx, IMU_0.wy, IMU_0.wz]
+      link2_gyro: [IMU_1.wx, IMU_1.wy, IMU_1.wz]
+    # Device axes -> MuJoCo site axes, z_site = M @ z_chip, per block. Acc and
+    # gyro of one chip share the matrix. Fitted 2026-09-16 against a MuJoCo
+    # replay of the same trajectory (lag + all 48 signed permutations, both
+    # chip->link assignments), reproduced on two independent recordings:
+    # gyro rms 0.06-0.10 rad/s, acc rms 0.27-0.38 m/s^2, vs 0.34 / 2.5 for the
+    # swapped wiring. Both are proper rotations (det +1) about the joint axis z.
+    axis_maps:
+      link1_acc:  [[0, 1, 0], [-1, 0, 0], [0, 0, 1]]   # IMU_0, Rz(-90 deg)
+      link2_acc:  [[0, -1, 0], [1, 0, 0], [0, 0, 1]]   # IMU_1, Rz(+90 deg)
+      link1_gyro: [[0, 1, 0], [-1, 0, 0], [0, 0, 1]]
+      link2_gyro: [[0, -1, 0], [1, 0, 0], [0, 0, 1]]
+    # Real arm lags the MuJoCo replay by ~395 ms (arm transport/queueing, not
+    # the IMUs). Log for a tail after the last setpoint or the motion is cut.
+    arm_lag_s: 0.395
+    sig_acc: 0.05               # m/s^2 per channel. TODO: replace with calibrate() R
+    sig_gyro: 0.005             # rad/s per channel. TODO: replace with calibrate() R
+    still_gyro_std: 0.02        # rad/s, calibration rejected above this
+
   imu_proximal:
     model: joint_accel_model    # erp.models.measurement
     rate_hz: 1000

@@ -5,6 +5,10 @@ import numpy as np
 from erp.core.linalg import make_spd
 from erp.sim.mujoco import F_dyn, H_dyn, f_dyn, h_dyn
 
+# Aca se puede optimizar el filtro de kalman de la siguiente manera:
+# el predict hace 2 calls al motor de mujoco para extraer F_dyn y f_dyn, e internamente
+# Se llama a la funcion transitionFD() considerar esta optimizacion mas adelante
+# Ya que se perderia la estructura de algebra facil de entender.
 
 class EKF:
     """EKF con f/F/h/H de MuJoCo. Update en forma de Joseph. CIEGO al control.

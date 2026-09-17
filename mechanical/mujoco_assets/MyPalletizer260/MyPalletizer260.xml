@@ -37,11 +37,11 @@
             <geom mesh="base_link_visual" name="base_link_visual_geom" type="mesh" material="mat_base_link" pos="0 0 0" quat="1 0 0 0" />
             <inertial mass="0.306344" pos="0.000244623 0.000669050 0.022901575" fullinertia="4.76583e-4 4.13724e-4 6.10633e-4 5.34039e-6 -6.42171e-8 2.75100e-5" />
             <body name="rot" pos="0 0.000005556 0.0735" quat="1 1 0 0">
-                <joint type="hinge" name="rot" axis="0 1 0" pos="0 0 0" ref="1.57" range="-2.79 2.79"/>
+                <joint type="hinge" name="rot" axis="0 1 0" pos="0 0 0" ref="1.57" range="-2.79 2.79" damping="0.477"/>
                 <geom mesh="rot_visual" name="rot_visual_geom" type="mesh" material="mat_rot" pos="0 0 0" quat="1 0 0 0" />
                 <inertial mass="0.182552" pos="0.000004211 0.015996681 0.001519631" fullinertia="2.36233e-4 2.43474e-4 1.54210e-4 -3.23220e-8 -2.10390e-8 -9.27873e-6" />
                 <body name="link1" pos="0 0.041 -0.00025" quat="0 1 0 0">
-                    <joint type="hinge" name="link1" axis="0 0 -1" pos="0 0 -0.030249556" ref="-3.1415" range="0 1.57"/>
+                    <joint type="hinge" name="link1" axis="0 0 -1" pos="0 0 -0.030249556" ref="-3.1415" range="0 1.57" damping="3.342"/>
                     <geom mesh="link1_visual" name="link1_visual_geom" type="mesh" material="mat_link1" pos="0 0 0" quat="1 0 0 0" />
                     <inertial mass="0.183389" pos="-0.005596236 0.045773016 -0.000411936" fullinertia="7.06920e-4 2.22166e-4 7.32050e-4 2.57367e-5 -9.80644e-7 -1.67577e-5" />
                     <frame name="link1_site_frame" pos="-0.012 0.065 0.035" quat="1 0 0 0">
@@ -52,7 +52,7 @@
                         <geom class="axis_z" /> <geom class="axis_z_tip" />
                     </frame>
                     <body name="link2" pos="0 0 0" quat="1 0 0 0">
-                        <joint type="hinge" name="link2" axis="0 0 -1" pos="0 0.13 -0.023999556" ref="1.57" range="0 1.05"/>
+                        <joint type="hinge" name="link2" axis="0 0 -1" pos="0 0.13 -0.023999556" ref="1.57" range="0 1.05" damping="0.955"/>
                         <geom mesh="link2_visual" name="link2_visual_geom" type="mesh" material="mat_link2" pos="0 0 0" quat="1 0 0 0" />
                         <inertial mass="0.247104" pos="0.004638108 0.098050313 0.000943384" fullinertia="6.06900e-4 1.77079e-4 6.50257e-4 5.97245e-5 1.68248e-6 -8.05481e-6" />
                         <frame name="link2_site_frame" pos="0.015  0.06 0.035" quat="1 0 0 0">
@@ -79,10 +79,18 @@
             </body>
         </body>
     </worldbody>
+    <!-- El kv de los servos NO va en el actuador: va como `damping` del joint
+         (rot 0.477, link1 3.342, link2 0.955). Con el integrador Euler por
+         defecto, el kv del actuador se integra EXPLICITO y a timestep 2 ms la
+         sim oscila a 250 Hz (Nyquist) al arrancar -- las "bandas dobles" del
+         log de sensores. El damping del joint Euler lo integra IMPLICITO:
+         misma fuerza -kv*qdot, resultado identico a integrator="implicitfast",
+         sin cambiar el integrador. Unica diferencia: el damping del joint no
+         cuenta para forcerange (hoy los servos no pasan del 10%). -->
     <actuator>
-        <position name="rot_servo"   joint="rot"   kp="10"  kv="0.477" forcerange="-4.0 4.0" ctrlrange="-2.79 2.79"/>
-        <position name="link1_servo" joint="link1" kp="80" kv="3.342" forcerange="-7.0 7.0" ctrlrange="0 1.57"/>
-        <position name="link2_servo" joint="link2" kp="40" kv="0.955" forcerange="-2.0 2.0" ctrlrange="0 1.04"/>
+        <position name="rot_servo"   joint="rot"   kp="10"  forcerange="-4.0 4.0" ctrlrange="-2.79 2.79"/>
+        <position name="link1_servo" joint="link1" kp="80" forcerange="-7.0 7.0" ctrlrange="0 1.57"/>
+        <position name="link2_servo" joint="link2" kp="40" forcerange="-2.0 2.0" ctrlrange="0 1.04"/>
     </actuator>
     <sensor>
         <accelerometer name="link1_acc" site="link1_site" />
