@@ -16,27 +16,39 @@ does, in several places listed below.
 
 ## Commands
 
-Everything below assumes the **`erp` conda env** (Python 3.11, mujoco
-3.11, ruff 0.16). The base Anaconda env is 3.13, does not have the
-package installed, and carries an older ruff that reports a different
-lint result.
+**The dev env on this machine is called `EKF`, not `erp`.** Verified
+2026-09-21: `conda env list` shows only `base`, `EKF` and `MATH`. `EKF`
+is Python 3.11.15 with numpy 2.4.6, mujoco 3.11.0, ruff 0.16.4, pytest
+9.1.1, matplotlib, and `erp` installed editable against this checkout —
+i.e. it is what `environment.yml` describes, just under a different
+name. `conda env create -f environment.yml` has never been run here, and
+running it would build a *second* environment rather than fix anything;
+`conda activate EKF` is the correct move. `base` is Python **3.14.6**
+(not 3.13 as this file used to say) and does not have the package.
+
+Note also that `EKF` **does** have `pyserial` 3.5 and `pymycobot` 4.0.7
+installed — the `[app]` extra, which the section below says is absent.
+See the correction under "`mujoco` is a core dependency".
 
 ```bash
 # Setup (either path) -- from the REPO ROOT, note the "."
 git lfs install
 pip install -e ".[dev]"                 # add [app] for real hardware, [viz] for matplotlib
-conda env create -f environment.yml     # installs -e .[dev,viz]
+conda env create -f environment.yml     # installs -e .[dev,viz]; already satisfied by `EKF`
 
-# The three checks CI runs, in order. All three pass on the current tree.
+# The checks CI runs, in order. Timings measured in `EKF` on this machine.
 ruff check software/src software/tests  # clean; rule set pinned via [tool.ruff.lint] select
-mypy software/src                       # strict; clean (34 files)
-pytest -q                               # 195 passed, 1 skipped, ~1.8 s
+mypy software/src                       # strict; clean (36 files)
+pytest -q                               # 241 passed, 12 FAILED, 1 skipped, ~6.1 s -- see below
+grep -rEl ...                           # import-direction, the 4th CI step; see below
 
 # The fast loop while working. `mujoco` marks the tests that need mujoco AND
 # the Git-LFS model assets -- that shared requirement, not what they assert.
-pytest -q -m "not mujoco"               # 150 passed, 1 skipped, 45 deselected, ~0.9 s
+pytest -q -m "not mujoco"               # 206 passed, 1 skipped, 47 deselected, ~4.3 s -- green
 
-# THE FOURTH CHECK, and the one that catches what the other three cannot.
+# The golden check. Not a separate CI step: `test_golden_run.py` imports
+# `run_pipeline` from this script, so `pytest` covers it. Run it directly
+# anyway -- it prints the per-key diffs and the summary scalars.
 python scripts/make_golden_run.py --check   # must print: OK ... a rtol=1e-12
 
 # Single test file / single case
@@ -48,22 +60,68 @@ grep -rEl "^\s*(from|import)\s+erp\.(sensors)" software/src/erp/estimators softw
 # any match is a violation -- the command should print nothing
 ```
 
+### The golden check is RED right now, and the code is not why
+
+Verified 2026-09-21. `pytest -q` fails 12 tests, all in
+`test_golden_run.py`, and `make_golden_run.py --check` reports shape
+mismatches (**1872** steps against the fixture's 1848) plus large rtol
+misses on `NIS_ekf`, `imu_bias`, `lag_imu` and the NIS scalars.
+
+**This is a data change, not a code change.** The working tree has an
+uncommitted *re-recording* of `data/raw/imu_trajectory_raw.csv` (and
+`data/raw/palletizer_traj.npz`). It has been re-recorded more than once
+while this work was going on — 72 measurements / 1869 steps / 3.59 s at
+one point, **73 / 1872 / 3.60 s** now — so take the exact figures here as
+an illustration and re-read them from `--check`. Proof that the code is
+not at fault:
+`run_pipeline(root_dir=...)` pointed at a shadow root holding the
+**committed** CSV (recovered from `.git/lfs/objects/12/0a/120a1573…`)
+reproduces the fixture at `rtol=1e-12`, every key, on the unchanged
+working-tree source.
+
+So before diagnosing a golden-run failure, check `git status` on
+`data/raw/`. The options, in order of preference:
+
+1. `git checkout -- data/raw/imu_trajectory_raw.csv` if the new
+   recording was incidental — the fixture goes green again immediately.
+2. Keep the new recording *and* regenerate the fixture
+   (`python scripts/make_golden_run.py`, no `--check`) — but that is the
+   deliberate act described below, and it must be committed together
+   with the CSV in one commit that says so. A regenerated fixture
+   defends nothing unless the log it was generated from is the log in
+   the tree.
+
+Do **not** loosen `--rtol` to paper over this; the failure is in the
+shapes, which no tolerance reaches.
+
+The re-recording is also why the notebook is modified: cell 14 commits
+`SEND_TO_ROBOT = True` and cell 15 `RUN_ROBOT_WITH_IMU = True`, with
+`ROBOT_PORT = "COM6"` and `IMU_PORT = "COM7"` hard-coded. Running
+`notebooks/mypalletizer260EKF.ipynb` top to bottom **opens both serial
+ports and drives the arm**. ADR-0002 § 3.1 is still accurate about this.
+
 **Run the golden check before and after any change to the estimation
 path.** `data/processed/golden_ekf_run.npz` is a frozen end-to-end run of
 the filter over the committed IMU log, and `--check` re-runs the pipeline
-and diffs it at `rtol=1e-12`. Six phases of refactoring have moved code
+and diffs it at `rtol=1e-12`. Eight phases of refactoring have moved code
 under it — the trajectory generator, the blind-model build, the rest
-state, the whole EKF — without moving one digit, and that is the only
-reason any of it can be believed. If it fails after a refactor, the
+state, the whole EKF, at P5 the filter loop and at P6 the rest-window
+calibration — without moving one digit, and that is the only reason any
+of it can be believed. If it fails after a refactor, the
 refactor changed the numbers; do not regenerate the fixture to make it
 pass. Regenerating is a deliberate act that needs saying out loud.
 
 Two known soft spots in it: `rtol=1e-12` has only ever been checked on
 Windows, and CI runs ubuntu on 3.10 and 3.11, so a cross-platform failure
 is plausible and the honest fix is loosening to ~1e-9, not regenerating
-per platform. And the lag it reports is 400 ms against the ~395 ms quoted
-below — a 2.5 ms search grid makes those adjacent points, but the two
-figures may simply come from different recordings.
+per platform. The fixture's own metadata confirms how narrow the evidence
+is — `meta_platform` is `Windows-10-10.0.26200-SP0`, `meta_python`
+3.11.15, `meta_numpy` 2.4.6, `meta_mujoco` 3.11.0, i.e. exactly the `EKF`
+env on this one machine. And the lag it reports is 400 ms against the
+~395 ms quoted below — a 2.5 ms search grid makes those adjacent points,
+but the two figures may simply come from different recordings. Three
+recordings have now reported **400, 405 and 400 ms**, which settles it:
+the spread is recording-to-recording, not a bug.
 
 **`mujoco` is a core dependency, not an extra.** ADR-0002 phase P0 moved
 it into `dependencies` and dropped `scipy`, which nothing had imported
@@ -72,9 +130,16 @@ and `erp.estimators` import mujoco at module scope, because MuJoCo *is*
 the model — so it was never optional, and while it sat in `[app]` CI
 installed `.[dev]` and type-checked a tree missing its central
 dependency. The `[app]` extra is now device access only: `pyserial` for
-the Teensy, `pymycobot` for the arm, both imported lazily. **Neither is
-installed in the `erp` env**, which is what makes "importing `erp.robot`
-must not need `pymycobot`" a real test rather than a formality.
+the Teensy, `pymycobot` for the arm, both imported lazily.
+
+**Correction (verified 2026-09-21): both ARE installed in `EKF`** —
+`pyserial` 3.5 and `pymycobot` 4.0.7, presumably because the notebook
+drives real hardware from this env. So "importing `erp.robot` must not
+need `pymycobot`" is *not* being tested locally; it is a formality here
+and a real test only in CI, which installs `.[dev]` alone. If you touch
+the lazy-import boundary in `robot/mypalletizer.py` or
+`sensors/imu_serial.py`, a green local `pytest` proves nothing about it —
+CI is the check that matters.
 
 Since ADR-0002 phase P4 the estimator no longer imports mujoco at all:
 `estimators/ekf.py` holds a `DiscreteDynamics` (a numpy-only protocol in
@@ -197,7 +262,11 @@ check is a single grep for `^\s*(from|import)\s+erp\.(sensors)` over
 - `erp.sim/`, `erp.core/`, `erp.io/` — not scanned at all;
 - `firmware/` or ROS 2 imports (`import rclpy`), despite the rule text;
 - indirect reach-through, e.g. importing a `calibration/` module that
-  itself imports `sensors/`.
+  itself imports `sensors/`. **That example stopped being hypothetical at
+  P6**: `erp/calibration/` exists, and it imports `erp.core.types` and
+  numpy and nothing else in `erp`. The dependency runs
+  `sensors/` → `calibration/`, one way. Keep it that way — reversing it
+  would put a hardware import one hop from anything that calibrates.
 
 The rule is broader than its enforcement. Verify by reading the import
 block. The tree is currently clean under the broader reading.
@@ -300,21 +369,40 @@ preserve both:
 
 ### How the loop actually runs
 
-`run_trajectory` (notebook) ticks at the setpoint rate, and after each
-`send` calls `drain()` on every sensor and appends to a
-`MeasurementLog`. It never blocks on a port — each live sensor has its
-own reader thread (`StreamSensor`), so the setpoint rate is independent
-of the IMU rate. That `drain` is the documented hook where online fusion
-will attach.
+`run_trajectory` (notebook) ticks at the setpoint rate over a
+`core.clock.RateLoop`, and after each `send` calls `drain()` on every
+sensor and appends to a `MeasurementLog`. It never blocks on a port —
+each live sensor has its own reader thread (`StreamSensor`), so the
+setpoint rate is independent of the IMU rate.
 
-Today estimation is **offline and post-hoc**: `run_imu_ekf` replays the
-logged measurements, stepping `predict()` by one `model.opt.timestep`
-(2 ms) at a time and applying each measurement at the nearest step
-(≤1 ms error against 50 ms between IMU samples). There is no
-`FusionEngine`, no event-timeline machinery, and no out-of-order
-handling — `erp/fusion/` is an empty package. If you add online fusion,
-that is the gap to fill; do not assume the old `InputHistory`/
-`FusionEngine` design is still the plan without asking.
+**Since P5 that `drain` hook is connected.** Pass `runner=` a
+`FilterRunner` and the filter runs *inside* the loop; leave it out and
+the loop behaves exactly as before. The same object replays a log
+offline via `run()`, which is how the golden run is produced — one
+implementation, two entry points, so M1 and M2 cannot drift apart in
+their arithmetic. `run_imu_ekf` is gone from both the notebook and
+`scripts/make_golden_run.py`.
+
+Three things about that loop that are easy to get wrong:
+
+- **Advance with `advance_to_safe(tick.t_actual)`, not
+  `advance_to(now)`.** A sensor stamps the *sample* instant and hands it
+  over later, so a filter advanced to now is ahead of whatever arrives
+  next and drops it. The loss is intermittent and phase-dependent, not
+  total — the dry run loses 1 of 61 at a 5 ms latency, and a phase sweep
+  finds cases losing 10 of 40 — which is exactly what makes it survive a
+  demo.
+- **`buffer_horizon` answers one question, not two:** how far behind real
+  time the estimate runs. It governs both when a held measurement is
+  released and how far the filter dares step. `0.0` is correct for a
+  replayed log and for a single sensor; it earns its keep when a second
+  stream with a different latency appears.
+- **Give the runner a `Clock` whenever `buffer_horizon > 0`.** Without
+  one the release watermark is the newest timestamp *ingested*, so each
+  sample waits for its successor — 50 ms of lag instead of 5.
+
+There is still no event-timeline machinery and no `InputHistory`. Do not
+assume the deleted `FusionEngine` design is the plan without asking.
 
 ### Numerical choices that are load-bearing
 
@@ -403,6 +491,47 @@ re-derive. Each has a test that would fail if it stopped being true.
   2.0013 ms against a 2.0000 ms physics step, so the commanded profile
   runs 0.067% slow. Carried over deliberately — the golden run was
   generated with it, so "fixing" it moves the fixture.
+- **Advancing the filter to `now` loses samples, intermittently.** At the
+  `SimSensor`'s 5 ms latency the notebook's own dry run lost **1 of 61**;
+  a sweep over four phases loses **0, 10, 0, 0 of 40**, and at 20 ms
+  every phase loses between a third and a half. The loss is
+  phase-dependent because 25 Hz commands and 20 Hz samples are not
+  integer multiples, so the phase drifts through a run. It is not a
+  filter that stops working — the loop runs and the plots are drawn, the
+  estimate is merely worse — and *that* is what makes it survive a demo.
+  `advance_to_safe` loses none, at every phase, with and without a clock.
+- **Those drop counts are ULP-fragile above 5 ms, so only the 5 ms row is
+  pinned.** Whether a sample is lost turns on whether a command tick
+  falls inside the latency window after its timestamp, so a sample within
+  one ULP of that boundary flips with the arithmetic used to *build the
+  fixture*: writing the sample instants `i / 20.0` instead of `i * 0.05`
+  moves the 20 ms counts by three. `test_fusion_runner.py` asserts the
+  monotonicity (more latency never loses fewer) instead, because that is
+  a property of the runner rather than of the test.
+- **The rest calibration, packaged (P6).** The accelerometer channels of
+  the cell's formula and `calibration_from_samples` were **already
+  identical** (`0.000e+00`); the gyro channels differ by exactly
+  `h_rest[gyro]`, max **2.352e-4 rad/s** — 4.7% of `sig_gyro`. That is
+  residual velocity `warmup_to_rest` leaves, i.e. a *model* artifact
+  folded into a *sensor* bias. Expecting 0 is the better physics and was
+  **not** adopted, because it moves the frozen run; zero the gyro
+  entries of `expected_rest` whenever someone decides to.
+- **A rest-window `R` is 3–8× tighter than nominal** (σ ratios 0.13–0.39
+  on the committed log). It is the noise floor *at rest* and says
+  nothing about motion or model error, so adopting it would sharpen an
+  already over-confident filter. Computed by `rest_bias`, used nowhere.
+- **The offline rest window holds 8 samples** (0.4 s at ~20 Hz) against
+  a live `min_samples` default of 20 — and a rejection returns
+  `valid=False` *together with a zero bias*, which looks exactly like
+  success to any caller that skips the flag. `rest_bias` defaults to 3.
+- **The online dry run** (P5's new notebook cell, `DryRunArm` +
+  `SimSensor`, no hardware): 1500 predicts and 61 updates over 3 s, NIS
+  median **9.6** against a target of 12, nothing discarded. Unlike every
+  other number here this one has **no test pinning it** — it lives in a
+  notebook cell — and it is a plumbing check, not evidence about the
+  estimator: the simulated IMU draws noise from the same `R` the filter
+  is given and the plant *is* the model. The figure that matters is the
+  one on real data, NIS median 29.
 
 ## Directory map / where things go
 
@@ -414,12 +543,13 @@ re-derive. Each has a test that would fail if it stopped being true.
 | `software/src/erp/estimators/` | `ekf` — `EKF` over a `DiscreteDynamics`; no `MjModel`, no mujoco import | builds on `models/` + `core/` |
 | `software/src/erp/robot/` | `base` (`ArmInterface`, `JointMap`), `dry_run` (`DryRunArm`), `mypalletizer` (`MyPalletizerArm`) — **command sink, never a measurement source** | may depend on `core/`; nothing in the estimation stack may import it |
 | `software/src/erp/trajectory.py` | `sine_sweep`, `resample` — the setpoint profile | numpy only |
-| `software/src/erp/sensors/` | `base` (`Sensor` ABC), `stream` (threaded base), `imu_serial` (`IMUDecoder`, `SerialIMUSensor`), `replay`, `sim`, `clock` (`ClockSync` — device→host, *not* `core.clock`), `mujoco` (`rows_of`, `make_R`) | may depend on core/ |
+| `software/src/erp/sensors/` | `base` (`Sensor` ABC), `stream` (threaded base), `imu_serial` (`IMUDecoder`, `SerialIMUSensor`), `replay`, `sim`, `clock` (`ClockSync` — device→host, *not* `core.clock`), `mujoco` (`rows_of`, `make_R`). `calibration_from_samples` is **re-exported, not defined here** — it moved to `calibration/` at P6 | may depend on `core/` and `calibration/` |
 | `software/src/erp/io/` | `log` (`MeasurementLog`), `paths` (`repo_root`, `resolve_repo_path`, `resolve_model_path`) | — |
-| `software/src/erp/fusion/` | **empty** — the old `FusionEngine` was deleted; `FilterRunner` lands here at P5 | — |
-| `software/src/erp/calibration/`, `viz/` | **empty** (P6, P8) | — |
-| `software/tests/` | 196 tests. `conftest` (fake serial port + IMU layout), `test_sensor_contract` (one suite over all three `Sensor`s), `test_imu_serial`, `test_clock`, `test_replay_log`, `test_paths`, `test_plant`, `test_golden_run`, `test_robot`, `test_trajectory`, `test_core_clock`, `test_dynamics`, `test_ekf_linear` | — |
-| `scripts/` | `make_golden_run.py` — generates and re-checks the golden fixture. A **holding pen**: it still carries `run_imu_ekf` (P5), `estimate_lag` and `site_position_cov` (P8) | not linted by CI |
+| `software/src/erp/fusion/` | `runner` — `FilterRunner` (timestamps → filter steps), `History`, `Estimator` protocol. **English**, beside `core/`/`io/`, not beside `estimators/`: it decides *when* the filter steps, never what it computes. Landed at P5; the old `FusionEngine` it replaces was deleted and shares no design with it | builds on `core/` + `models/`; **never** `sensors/`, `robot/` or a wall clock |
+| `software/src/erp/calibration/` | `rest` — `calibration_from_samples` (moved here from `sensors/imu_serial.py` at P6, still re-exported there), `rest_bias` (the offline counterpart of `SerialIMUSensor.calibrate`). **English** | `core/` + numpy **only**; `sensors/` imports this, never the reverse |
+| `software/src/erp/viz/` | **empty** (P8). `__init__.py` carries a one-line docstring ("Plotting and visualisation helpers. Geometry only, no backend imports.") and nothing else — honor that "no backend imports" when P8 lands | — |
+| `software/tests/` | 254 tests. `conftest` (fake serial port + IMU layout), `test_sensor_contract` (one suite over all three `Sensor`s), `test_imu_serial`, `test_clock`, `test_replay_log`, `test_paths`, `test_plant`, `test_golden_run`, `test_robot`, `test_trajectory`, `test_core_clock`, `test_dynamics`, `test_ekf_linear`, `test_fusion_runner` (47, no mujoco — carries a verbatim copy of the old `run_imu_ekf` as a bit-identity oracle), `test_calibration` (11, 9 of them fast — same oracle trick against notebook cell 19's block) | — |
+| `scripts/` | `make_golden_run.py` — generates and re-checks the golden fixture. A **holding pen**: `run_imu_ekf` left at P5, so what remains is `estimate_lag` and `site_position_cov`, both P8's. When they go, M1 closes | not linted by CI |
 | `data/processed/` | `golden_ekf_run.npz` — the frozen run. Git-LFS | — |
 | `notebooks/` | `mypalletizer260EKF.ipynb` — **the driver application**; `viewer.ipynb` (MuJoCo viewer + `SimLog`); `finger_imu_toolkit.ipynb` (finger EKF rebuilt on `erp`); `finger_imu_practice.ipynb`, `Palletizer.ipynb` (reference) | may import anything |
 | `mechanical/mujoco_assets/` | `MyPalletizer260/MyPalletizer260.xml` + STL meshes, `axis_xyz.xml` — the model everything runs on | — |
@@ -456,8 +586,9 @@ one now. `get_project_root` is kept as an alias.
   failure looks like when it is not honored; match that, not bare
   descriptions.
 - **Language follows the module, not your preference.** English:
-  `core/`, `io/`, `sensors/`, `robot/`, `trajectory.py`, all tests, and
-  `docs/adr/`. Spanish: `sim/`, `estimators/`, `models/`, the notebooks
+  `core/`, `io/`, `sensors/`, `robot/`, `fusion/`, `calibration/`,
+  `trajectory.py`, all tests, and `docs/adr/`. Spanish: `sim/`,
+  `estimators/`, `models/`, the notebooks
   and `docs/theory/`. The split is roughly hardware-and-plumbing versus
   physics-and-filtering; new modules on the command path (`robot/`,
   `trajectory.py`) follow `sensors/` into English. Match the file you are
@@ -513,9 +644,17 @@ one now. `get_project_root` is kept as an alias.
 ## Current repo state
 
 `git log --oneline -5` and `git status` are the authority; this section
-goes stale on its own. **The work described here is uncommitted** —
-`3ada284` is the last commit and everything from ADR-0002 sits in the
-working tree.
+goes stale on its own. **The ADR-0002 work is now committed** — as of
+2026-09-21 the tip is `587162f "P0-P4 development (0002 notebook)"`, and
+the earlier claim here that `3ada284` was the last commit is out of date.
+`587162f` does not follow the conventional-commit rule this file states;
+follow the convention anyway.
+
+What is uncommitted is only data and the notebook:
+`data/raw/imu_trajectory_raw.csv`, `data/raw/palletizer_traj.npz` and
+`notebooks/mypalletizer260EKF.ipynb` — the 2026-09-21 hardware run.
+That is what turns the golden check red; see the top of this file before
+concluding anything about the code from it.
 
 Working: the `Sensor` stack (`SerialIMUSensor` + `IMUDecoder` over a
 Teensy, `ReplaySensor` with CSV loaders and paced release, `SimSensor`
@@ -524,9 +663,14 @@ over recorded MuJoCo output, `ClockSync`), `MeasurementLog`, the MuJoCo
 `erp.robot`, `erp.trajectory`, `erp.core.clock`, the
 `DiscreteDynamics` seam, the blind EKF, and the palletizer notebook end
 to end (trajectory → real arm + MuJoCo replay → IMU log → EKF →
-end-effector covariance). 195 tests pass, 1 skipped.
+end-effector covariance). 196 tests collected; **183 pass, 12 fail, 1
+skipped** on the working tree as it stands, and all 12 failures are
+`test_golden_run.py` against the re-recorded log. Against the committed
+log the suite is 195 passed / 1 skipped, as it has been. `ruff` and
+`mypy --strict` are both clean, and `pytest -m "not mujoco"` is green
+(150 passed, 1 skipped, 45 deselected).
 
-**ADR-0002 phases P0, P0.5, P1, P2, P3, P3.5 and P4 are done.** Read
+**ADR-0002 phases P0, P0.5, P1, P2, P3, P3.5, P4, P5 and P6 are done.** Read
 `docs/adr/0002-notebook-to-package.md` before starting any of the rest:
 each finished phase carries a *What landed* record, including where the
 plan turned out to be wrong and was changed on purpose (P3 was reshaped
@@ -540,38 +684,59 @@ Two things to preserve from the finished phases:
   so no `Any` leaks into the estimator under strict mypy.
 - **Every phase so far has left `make_golden_run.py --check` green at
   `rtol=1e-12`**, including P4, which rewrote the EKF. That is the
-  standard: a refactor that moves the numbers is not a refactor.
+  standard: a refactor that moves the numbers is not a refactor. Still
+  true as of 2026-09-21 — re-verified by running `run_pipeline` against
+  the committed log on the current sources.
 
-**M1 is not achieved, despite every M1 phase being done** — these are
+**M1 is still not achieved, and P5 did not close it** — these are
 different claims and it is easy to bank the wrong one. M1 needs *the
 package*, not a script, to reproduce the golden run, plus a
-`ConsistencyReport`. Today `run_imu_ekf` (P5) and `site_position_cov`
-(P8) still live in `scripts/make_golden_run.py`. M1 closes at P5 and P8.
+`ConsistencyReport`. P5 took `run_imu_ekf` into `erp.fusion`, so what is
+left in `scripts/make_golden_run.py` is `estimate_lag` and
+`site_position_cov` — both P8's. **M1 now closes at P8 alone.**
 
-Not built: online fusion (`fusion/` is empty — `FilterRunner` is P5),
-`calibration/`, `viz/`, `ros2_ws/`, a loader for
-`config/estimation.yaml`, and any UKF.
+Not built: `viz/`, `analysis/`, `runtime/`, `ros2_ws/`, a loader for
+`config/estimation.yaml`, and any UKF. Online fusion exists
+(`erp.fusion.FilterRunner`) but has only been run against `DryRunArm` +
+`SimSensor`, never against the Teensy.
 
 Known open items:
 
-- **`run_trajectory` still has its own absolute-deadline loop**, which
-  `RateLoop` now duplicates. P3.5 added without removing, on purpose,
-  because the consumer is `FilterRunner`. P5 is not done until there is
-  one copy. A test holds the two schedules equal meanwhile, and found
-  that they agree only when `span * rate_hz` is a whole number — at 2.5 s
-  and 25 Hz they diverge by half a period. `resample` preserves the
-  trajectory's endpoints; `RateLoop` holds the nominal period. P5 has to
-  pick one deliberately.
+- ~~`run_trajectory` still has its own absolute-deadline loop.~~
+  **Closed at P5.** It runs on `RateLoop` now and the achieved-rate and
+  jitter arithmetic went with it. The policy question P3.5 left open was
+  decided in favour of `RateLoop`'s nominal period (`t0 + i / rate_hz`)
+  over `resample`'s endpoint-preserving axis: ADR-0002 § 4.7 makes the
+  command period a *scheduling parameter*, and pacing off the
+  trajectory's axis couples the scheduler to the trajectory. `resample`
+  still supplies the setpoint values, endpoint included, so only the
+  *timing* changes, and only when `span * rate_hz` is fractional — at the
+  notebook's 3 s and 25 Hz the two are bit-identical.
 - **A fourth copy of the IMU wiring** lives in `sensors/imu_serial.py`
   (its `IMUDecoder` docstring), siding with `conftest.py` against the
-  config. ADR-0002 § 3.3's table lists only three.
-- The `Measurement` → filter path is only half connected. `EKF.update`
-  now takes a per-measurement `R`, but `run_imu_ekf` still unpacks
-  measurements into bare arrays before the filter sees them (P5).
+  config. ADR-0002 § 3.3's table lists only three. Verified 2026-09-21,
+  the split is 2–2: `config/estimation.yaml:80-86` and
+  `scripts/make_golden_run.py:76-81` say **IMU_0 → link1, IMU_1 →
+  link2**; `software/tests/conftest.py:22-28` and
+  `software/src/erp/sensors/imu_serial.py:48` say the opposite. The
+  golden fixture was generated from the first pair, so that is the one
+  the numbers rest on — and the one to keep when P7's config loader
+  collapses the four into one.
+- ~~The `Measurement` → filter path is only half connected.~~ **Closed
+  at P5**: `FilterRunner.ingest` takes a `Measurement` and passes `m.R`
+  into `EKF.update`. One piece is deliberately left — `MeasurementLog`
+  stores `(t, Z, rows)` and drops `R`, so a run driven from a logged
+  session rebuilds the measurements with the decoder's `R`. Teaching the
+  log to carry `R` is P7's, with the config loader.
 
 - `sig_acc` / `sig_gyro` in the config are nominal, not measured;
   `SerialIMUSensor.calibrate()` exists to replace them with a real `R`
-  and has not been run on the arm.
+  and has not been run on the arm. **P6 measured what would happen if it
+  were**: an `R` from the static rest window is 3–8× tighter than
+  nominal, because it is the noise floor at rest and says nothing about
+  motion or model error. Adopting it would make an already
+  over-confident filter worse, so `rest_bias` returns it and nothing
+  uses it. Do not wire it up without re-reading that test.
 - The firmware sends no timestamp, so `SerialIMUSensor` defaults to
   `ArrivalClock(0.0)` — bias and jitter both present. `ClockSync` is
   written, tested, and unused until the Teensy sends `micros()`.
@@ -613,7 +778,7 @@ Assume these are historical unless you have checked against the source:
   Read § 6 before tuning anything. They describe the finger, not the arm.
 - `docs/adr/0002-notebook-to-package.md` is the **current** plan, and
   now also the record of what has been built against it —
-  P0 → P4 are marked done with per-phase notes. It is the first thing to
+  P0 → P5 are marked done with per-phase notes. It is the first thing to
   read before touching the estimation path. Its remaining content: the
   pipeline as it exists, what blocks packaging it, the target module
   layout and a phased roadmap. It frames the work as three capability
@@ -621,9 +786,12 @@ Assume these are historical unless you have checked against the source:
   not yet in the package), **M2** real-time simulated operation with
   decoupled command and sensor clocks, **M3** the same code on physical
   hardware (the objective). Each phase is tagged with the milestone it
-  serves. **P5 is next**: it finishes M1, resolves the `RateLoop` /
-  `run_trajectory` duplication, and is the phase that actually puts the
-  filter in the loop.
+  serves. **P7 is next** (`erp.io.config`: YAML into dataclasses, with
+  `build_decoder()` / `build_sensor()`, making `config/estimation.yaml`
+  the only wiring definition and settling the four-way disagreement
+  above), and **P8 is what closes M1** — the `ConsistencyReport` plus
+  `propagate_to_site`, which empties `scripts/make_golden_run.py`. P8 is
+  blocked by neither.
 
   Unlike the documents above it, this one is **not** historical, and it
   is kept current as phases land rather than rewritten — a finished phase

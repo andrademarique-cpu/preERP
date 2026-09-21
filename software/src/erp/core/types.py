@@ -24,7 +24,7 @@ import numpy.typing as npt
 Array = npt.NDArray[np.float64]
 IntArray = npt.NDArray[np.intp]
 
-__all__ = ["Array", "CalibrationResult", "IntArray", "Measurement"]
+__all__ = ["Array", "Belief", "CalibrationResult", "IntArray", "Measurement", "UpdateInfo"]
 
 
 # ``eq=False`` throughout: the generated ``__eq__`` would compare ndarray fields
@@ -67,6 +67,72 @@ class Measurement:
     rows: IntArray
     R: Array
     source: str
+
+
+@dataclass(frozen=True, slots=True, eq=False)
+class Belief:
+    """The filter's state estimate at one instant, as seen from outside.
+
+    What :class:`~erp.fusion.runner.FilterRunner` hands back per tick, so the
+    command loop can read the estimate without touching the estimator's mutable
+    ``x`` and ``P`` attributes -- those are rebound on every predict, so a
+    caller holding a reference to them is holding a moving target.
+
+    ADR-0002 4.4 specifies this type; P4 deliberately did not build it, on the
+    grounds that adding a type nothing reads yet is how ``models/__init__``
+    ended up with its re-export block commented out for a year. P5 is the
+    consumer that makes it real.
+
+    Attributes
+    ----------
+    x:
+        (nx,) state estimate. MuJoCo's tangent layout for the blind arm model:
+        ``[qpos[:nv] rad, qvel[:nv] rad/s, act[:na] rad]``.
+    P:
+        (nx, nx) state covariance, units of ``x`` squared.
+    t:
+        Seconds, absolute host base -- the same base
+        :attr:`Measurement.timestamp` and :class:`~erp.core.clock.Tick` use.
+        This is the instant the estimate is *for*, which is the filter's
+        quantised step time, not the instant it was read.
+    """
+
+    x: Array
+    P: Array
+    t: float
+
+
+@dataclass(frozen=True, slots=True, eq=False)
+class UpdateInfo:
+    """What one measurement did to the filter.
+
+    Returned by ``FilterRunner.ingest`` when a measurement was applied, and
+    ``None`` when it was dropped -- so a caller that ignores the return value
+    still gets the drop counted in ``.discarded`` rather than nowhere.
+
+    ``nis`` is the diagnostic that decides whether the filter is consistent;
+    the innovation is kept beside it because a NIS on its own cannot say
+    *which* channel is responsible.
+
+    Attributes
+    ----------
+    innovation:
+        (k,) ``z - h(x)`` over the measured channels, in the units of ``z``.
+    nis:
+        Normalised innovation squared, ``y^T S^-1 y``. Dimensionless, and
+        chi-squared with ``k`` degrees of freedom when the filter is
+        consistent, so the target is ``k`` itself -- 12 for one IMU line.
+    rows:
+        (k,) indices into ``data.sensordata`` this update touched.
+    t:
+        Seconds, absolute host base: the filter step the update was applied
+        at, not ``Measurement.timestamp``. They differ by up to half a step.
+    """
+
+    innovation: Array
+    nis: float
+    rows: IntArray
+    t: float
 
 
 @dataclass(frozen=True, eq=False)

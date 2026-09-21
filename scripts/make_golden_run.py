@@ -19,12 +19,14 @@ ESTE ARCHIVO SE VA VACIANDO SOLO. Arranco con cinco funciones copiadas del
 notebook (ADR-0002 5.3: mover sin refactorizar). La fase P1 ya se llevo tres
 --- `find_repo_root` -> `erp.io.paths.repo_root`, `compile_blind_model` ->
 `erp.sim.plant.blind_variant`, `rest_state` -> `erp.sim.plant.warmup_to_rest`
---- y la P3 se llevo la trayectoria, que estaba escrita a mano aca adentro
-(`erp.trajectory.sine_sweep`). El .npz no se movio ni un digito en ninguna de
-las dos, que es exactamente el chequeo que P0.5 existe para permitir. Quedan
-`estimate_lag` (se va en P8), `run_imu_ekf` (P5, `FilterRunner`) y
-`site_position_cov` (P8, `propagate_to_site`). Cuando se vayan las tres, este
-script es solo configuracion y una llamada.
+--- la P3 se llevo la trayectoria, que estaba escrita a mano aca adentro
+(`erp.trajectory.sine_sweep`), y la P5 se llevo `run_imu_ekf`
+(`erp.fusion.FilterRunner`). El .npz no se movio ni un digito en ninguna de las
+tres, que es exactamente el chequeo que P0.5 existe para permitir. Quedan
+`estimate_lag` y `site_position_cov`, las dos de la P8 (`ConsistencyReport` y
+`propagate_to_site`). Cuando se vayan, este script es solo configuracion y una
+llamada --- y ahi recien se cierra M1, porque M1 pide que reproduzca la corrida
+EL PAQUETE, no un script.
 
     python scripts/make_golden_run.py            # escribe el .npz
     python scripts/make_golden_run.py --check    # corre y compara, no escribe
@@ -42,7 +44,9 @@ from typing import Any
 import mujoco as mj
 import numpy as np
 
+from erp.calibration import rest_bias
 from erp.estimators import EKF
+from erp.fusion import FilterRunner
 from erp.io.paths import repo_root, resolve_repo_path
 from erp.sensors import IMUDecoder, ReplaySensor
 from erp.sensors.mujoco import make_R, rows_of
@@ -121,40 +125,6 @@ def estimate_lag(t_ref, q_ref_deg, t_meas, q_meas_deg, max_lag_s=0.6, n=241):
         if rms < best:
             best, best_lag = rms, lag
     return best_lag
-
-
-def run_imu_ekf(ekf, t_meas, Z, rows):
-    """Corre el EKF sobre mediciones ya dadas, prediciendo de a un paso de MuJoCo.
-
-    t_meas : (N,) s, relativo al arranque de la trayectoria. El filtro arranca en 0.
-    Z      : (N, k) lecturas en el marco del site (m/s^2, rad/s), orden de `rows`
-    rows   : (k,) filas de sensordata
-
-    `predict` avanza model.opt.timestep = 2 ms y la IMU llega cada 50 ms, asi
-    que entre dos mediciones hay ~25 predicts. Cada medicion se aplica en el
-    paso mas cercano a su sello: error <= 1 ms contra 50 ms entre muestras.
-
-    -> (T, XH, PP, NIS): tiempo [s], estado y covarianza en CADA paso -- los
-       predicts, y en el mismo T el posterior de cada update, para que la banda
-       muestre cuanto crece entre muestras -- y el NIS de cada medicion.
-    """
-    # Antes esto era `ekf.model.opt.timestep` y `ekf.model.nsensordata`: el
-    # filtro tenia un MjModel adentro y quien lo usaba lo sabia. La fase P4 lo
-    # saco, y ahora el paso y el ancho de la observacion salen del contrato.
-    dt = ekf.dyn.dt
-    z_full = np.zeros(ekf.dyn.nz)
-    k_now = 0
-    T, XH, PP, NIS = [0.0], [ekf.x.copy()], [ekf.P.copy()], []
-    for tk, zk in zip(t_meas, Z):
-        while k_now < int(round(tk / dt)):
-            ekf.predict()
-            k_now += 1
-            T.append(k_now * dt); XH.append(ekf.x.copy()); PP.append(ekf.P.copy())
-        z_full[rows] = zk
-        _, nis = ekf.update(z_full, rows)
-        NIS.append(nis)
-        T.append(k_now * dt); XH.append(ekf.x.copy()); PP.append(ekf.P.copy())
-    return np.array(T), np.array(XH), np.array(PP), np.array(NIS)
 
 
 def site_position_cov(XH, PP, model, data, rows):
@@ -269,15 +239,50 @@ def run_pipeline(
     x_rest = np.r_[warmup_to_rest(model, data, q_target[0]), q_target[0]]
     h_rest = h_dyn(x_rest, np.zeros(model_blind.nu), model_blind, data_blind)[imu_rows]
 
-    rest = imu_t < REST_S
-    gyro_cols = imu_decoder.indices_of(["link1_gyro", "link2_gyro"])
-    rest_gyro = np.linalg.norm(imu_z[rest][:, gyro_cols], axis=1).max() if rest.any() else np.inf
-    if rest.sum() < 3 or rest_gyro > REST_GYRO_MAX:
-        raise ValueError(
-            f"La ventana de reposo [0, {REST_S}) s no esta quieta: {rest.sum()} muestras, "
-            f"norma de gyro max {rest_gyro:.3f} rad/s (limite {REST_GYRO_MAX}). Acorta REST_S."
-        )
-    imu_bias = imu_z[rest].mean(axis=0) - h_rest
+    # El bias de reposo se fue a `erp.calibration.rest_bias` en la fase P6. Dos
+    # cosas cambian de forma y ninguna de numero:
+    #
+    # 1. Devuelve un `CalibrationResult` en vez de levantar. Quien llama decide
+    #    si una calibracion invalida es fatal; ACA LO ES, porque seguir de
+    #    largo restaria un bias de cero y eso se parece demasiado a que salio
+    #    bien. El mensaje de la guarda es el mismo de siempre.
+    # 2. `min_samples=3`: la ventana de 0.4 s a ~20 Hz tiene 8 muestras, y el
+    #    default de `calibration_from_samples` (20, pensado para una
+    #    calibracion en vivo de 2 s) rechazaria toda corrida offline.
+    #
+    # `expected_rest=h_rest` se aplica a TODOS los canales, gyro incluido, que
+    # es lo que hacia la celda. Los canales de gyro de `h_rest` no son cero
+    # sino hasta 2.4e-4 rad/s --- velocidad residual que deja `warmup_to_rest`,
+    # o sea un artefacto del MODELO metido dentro del bias del SENSOR. Esperar
+    # cero seria mejor fisica y mueve la corrida congelada un 4.7% de
+    # `sig_gyro` en dos canales, asi que no se hace aca: ver el registro de P6.
+    cal = rest_bias(
+        imu_t, imu_z,
+        expected_rest=h_rest,
+        gyro_idx=imu_decoder.indices_of(["link1_gyro", "link2_gyro"]),
+        acc_idx=imu_decoder.indices_of(["link1_acc", "link2_acc"]),
+        rest_s=REST_S,
+        max_gyro_norm=REST_GYRO_MAX,
+    )
+    if not cal.valid:
+        raise ValueError(cal.note)
+    imu_bias = cal.bias
+
+    # El bias entra POR EL DECODER y se vuelve a decodificar, en vez de
+    # restarse despues: es el mismo mecanismo que `apply_calibration` usa en el
+    # sensor vivo (`IMUDecoder.apply` hace `raw @ axis_map - b`), asi que
+    # offline y en vivo hacen una sola cosa. Es exactamente para esto que el
+    # log se guarda CRUDO. Bit a bit identico a restar despues: la expresion y
+    # el orden de las operaciones son los mismos.
+    imu_decoder.b = imu_bias
+    ms = ReplaySensor.from_legacy_imu_csv(csv_path, imu_decoder, rows=imu_rows,
+                                          R=imu_R, name="imu").drain()
+
+    # La `R` calibrada (`cal.R`) queda SIN USAR a proposito. Medida sobre estas
+    # 8 muestras quietas es 3-8x mas angosta que la nominal, porque es el piso
+    # de ruido EN REPOSO: no dice nada del ruido en movimiento ni del error de
+    # modelo. Adoptarla haria mas confiado a un filtro que ya lo es de mas
+    # (NIS 29 contra un objetivo de 12). `test_calibration.py` lo mide.
 
     # -- 6. el filtro (celda 19) --------------------------------------------
     R_full = make_R(model_blind, SIG_ACC, SIG_GYRO)
@@ -290,8 +295,25 @@ def run_pipeline(
     # `DiscreteDynamics`, y `MujocoDynamics` es quien lo cumple con fisica.
     dyn = MujocoDynamics(model_blind, data_blind)
     ekf = EKF(x_rest, P0, Q_blind, R_full, dyn)
+
+    # `run_imu_ekf` vivia aca; se fue a `erp.fusion.FilterRunner` en la P5. Dos
+    # cosas cambian de forma y ninguna de numero:
+    #
+    # 1. El filtro consume `Measurement`s, no `(t, Z, rows)` sueltos, asi que la
+    #    `R` de la medicion ENTRA al update. Es la otra mitad de ADR-0002 3.2.
+    #    Hoy da igual --- el sensor arma su R como el mismo bloque que el filtro
+    #    ya recortaba de `R_full` --- y por eso la corrida congelada no se mueve.
+    #    Empieza a importar en P6, cuando `calibrate()` corra sobre el brazo.
+    # 2. El bias ya viene restado por el decoder (paso 5, fase P6).
+    runner = FilterRunner(ekf, t0=0.0)
     t_start = time.perf_counter()
-    T_ekf, XH_ekf, PP_ekf, NIS_ekf = run_imu_ekf(ekf, imu_t, imu_z - imu_bias, imu_rows)
+    hist = runner.run(ms)
+    T_ekf, XH_ekf, PP_ekf, NIS_ekf = hist.t, hist.x, hist.P, hist.nis
+    # El log grabado viene ordenado y a 50 ms, o sea ~25 pasos entre muestras:
+    # nada puede llegar tarde. Si esto salta, el log dejo de ser lo que el
+    # fixture congelo, y las cuentas de abajo no son comparables.
+    if hist.discarded:
+        raise RuntimeError(f"{hist.discarded} mediciones descartadas por llegar tarde")
     p_ef, C_ef = site_position_cov(XH_ekf, PP_ekf, model_blind, data_blind, ef_rows)
     sig_ef = np.sqrt(np.einsum("nii->ni", C_ef))      # (N, 3) m, 1 sigma por eje del mundo
     wall_s = time.perf_counter() - t_start

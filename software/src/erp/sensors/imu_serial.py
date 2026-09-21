@@ -24,6 +24,12 @@ from typing import Literal, Protocol
 import numpy as np
 import numpy.typing as npt
 
+# `calibration_from_samples` lived here until ADR-0002 P6 moved it to
+# `erp.calibration.rest`, next to the offline `rest_bias` that shares its
+# arithmetic. It is re-exported so `erp.sensors`'s `__all__` stays an accurate
+# inventory of what this package offers and no caller had to change.
+# The dependency runs sensors -> calibration and must never run back.
+from erp.calibration.rest import calibration_from_samples
 from erp.core.types import Array, CalibrationResult, IntArray, Measurement
 from erp.sensors.base import SensorError
 from erp.sensors.clock import ArrivalClock, HostClock
@@ -209,75 +215,6 @@ class LineTransport(Protocol):
     def readline(self) -> bytes: ...
 
     def close(self) -> None: ...
-
-
-def calibration_from_samples(
-    Z: npt.ArrayLike,
-    current_bias: npt.ArrayLike,
-    *,
-    gyro_idx: npt.ArrayLike,
-    acc_idx: npt.ArrayLike,
-    expected_rest: npt.ArrayLike | None = None,
-    still_gyro_std: float = 0.02,
-    min_samples: int = 20,
-) -> CalibrationResult:
-    """Static calibration from samples taken while the arm is not moving.
-
-    Parameters
-    ----------
-    Z:
-        (N, dim) calibrated samples, produced with ``current_bias`` applied.
-    current_bias:
-        (dim,) bias in effect while ``Z`` was recorded.
-    gyro_idx, acc_idx:
-        Positions of gyro (rad/s) and accelerometer (m/s^2) channels in ``z``.
-    expected_rest:
-        (dim,) what MuJoCo's sensors read at the rest pose, e.g. ``h(x_home)``
-        at the rows. Required to estimate accelerometer bias: at rest an
-        accelerometer reads gravity, not zero. Without it only the gyro bias
-        (expected 0 rad/s at rest) is estimated.
-    still_gyro_std:
-        rad/s. A gyro channel noisier than this means the arm moved, and the
-        result is marked invalid instead of baking motion into the bias.
-    min_samples:
-        Fewer samples than this -> invalid.
-
-    Returns
-    -------
-    A :class:`CalibrationResult` whose ``bias`` is the *total* bias to use
-    (current + correction) and whose ``R`` is the sample covariance.
-    """
-    Z_a = np.atleast_2d(np.asarray(Z, dtype=np.float64))
-    b0 = np.asarray(current_bias, dtype=np.float64)
-    dim = b0.size
-    g = np.asarray(gyro_idx, dtype=np.intp)
-    a = np.asarray(acc_idx, dtype=np.intp)
-    n = Z_a.shape[0] if Z_a.size else 0
-
-    if n < min_samples:
-        return CalibrationResult(
-            bias=b0.copy(), scale=np.ones(dim), R=np.zeros((dim, dim)), valid=False,
-            note=f"only {n} samples, need {min_samples}",
-        )
-
-    mean = Z_a.mean(axis=0)
-    R = np.atleast_2d(np.cov(Z_a, rowvar=False)) + 1e-12 * np.eye(dim)
-    delta = np.zeros(dim)
-    delta[g] = mean[g]
-    notes = [f"{n} samples"]
-    if expected_rest is not None:
-        exp = np.asarray(expected_rest, dtype=np.float64)
-        delta[a] = mean[a] - exp[a]
-    else:
-        notes.append("accelerometer bias not estimated (no expected_rest)")
-
-    gyro_std = float(Z_a[:, g].std(axis=0).max()) if g.size else 0.0
-    valid = gyro_std <= still_gyro_std
-    if not valid:
-        notes.append(f"gyro std {gyro_std:.4f} rad/s > {still_gyro_std} -- arm moved?")
-    return CalibrationResult(
-        bias=b0 + delta, scale=np.ones(dim), R=R, valid=valid, note="; ".join(notes)
-    )
 
 
 class SerialIMUSensor(StreamSensor):

@@ -5,24 +5,39 @@
 - **Supersedes:** ADR-0001 § D1 (the four ABCs) and § D5 (MuJoCo behind a sensor)
 - **Subject:** `notebooks/mypalletizer260EKF.ipynb` → `software/src/erp/`
 
-**Progress: P0, P0.5, P1, P2, P3, P3.5 and P4 are done. P5 onward are not
-started.**
+**Progress: P0, P0.5, P1, P2, P3, P3.5, P4, P5 and P6 are done. P7 onward are
+not started.**
 
 **Every phase in group G1 is now complete, and M1 is still not achieved.** The
 two are not the same claim and it would be easy to bank the wrong one. M1's
 acceptance criterion is that *the package*, not the notebook, reproduces the
 golden run, plus a `ConsistencyReport` landing at NIS 11–13 on simulated data.
 Today the golden run is still driven by `scripts/make_golden_run.py`, which
-holds `run_imu_ekf` (P5's) and `site_position_cov` (P8's), and
-`ConsistencyReport` does not exist. What G1 bought is that every *piece* it
-uses now lives in the package. **M1 closes at P5 and P8, not here.**
+~~holds `run_imu_ekf` (P5's) and~~ holds `estimate_lag` and `site_position_cov`
+(both P8's), and `ConsistencyReport` does not exist. What G1 bought is that
+every *piece* it uses now lives in the package. ~~**M1 closes at P5 and P8, not
+here.**~~ **P5 has since landed and did not close M1: it took `run_imu_ekf` out
+of the script, which is necessary and not sufficient. M1 closes at P8 alone.**
 The per-phase records are in § 5.2 and the obligation status is the rightmost
 column of § 6. In short: the tree is green, M1's acceptance test exists as a
 frozen fixture, `erp.sim.plant` + a fixed `erp.io.paths` have absorbed the
 notebook's model-setup helpers, `erp.robot` owns both arms and the range guard
-that gates every send, and `erp.trajectory` owns the setpoint profile — none
-of it moving a digit of the golden run. The suite is **144 passed, 1 skipped
-in ~1.3 s** (was 44/1 at P0), of which 100 are new in P0.5 through P3.
+that gates every send, `erp.trajectory` owns the setpoint profile, and since
+P5 `erp.fusion.FilterRunner` owns every conversion of a timestamp into filter
+steps — none of it moving a digit of the golden run.
+
+> **Counts updated at P5** (the numbers below stood at P3 and were left stale
+> through P3.5 and P4). The suite is **242 collected, 230 passed, 1 skipped**,
+> and the 12 failures are `test_golden_run.py` against an uncommitted
+> **re-recording** of `data/raw/imu_trajectory_raw.csv`, not against any code:
+> run the same pipeline over the *committed* log and it reproduces the fixture
+> at `rtol=1e-12`, every key. `pytest -m "not mujoco"` is 197 passed, 1
+> skipped, 45 deselected in ~3.4 s.
+>
+> Two more statements in this header went stale the same way and are corrected
+> rather than deleted: "M1's remaining phase is P4" and "the M2 phases that
+> decide whether the filter can run in the loop (P3.5, P5) have not started".
+> **P3.5, P4 and P5 are all done**, and what remains of M1 is P8.
 
 **P3 was reshaped before it was built, and § 5.2 records the disagreement
 rather than quietly rewriting the plan.** The short version: its original
@@ -32,8 +47,11 @@ script. Read that entry before treating any other phase's stated test as
 settled — the plan was written before the code was, and the same can be true
 elsewhere.
 
-M1's remaining phase is P4. The M2 phases that decide whether the filter can
-run in the loop (P3.5, P5) have not started.
+~~M1's remaining phase is P4. The M2 phases that decide whether the filter can
+run in the loop (P3.5, P5) have not started.~~ Superseded at P5: P3.5, P4 and
+P5 are done, the filter now runs inside `run_trajectory`'s drain hook, and
+M1's remaining phase is **P8** — the `ConsistencyReport` and moving the golden
+run's last two helpers out of `scripts/`.
 
 Nothing in § 2 or § 3 has been rewritten to match. Those sections record the
 pipeline and its blockers **as found**, and the measured numbers in them are
@@ -324,6 +342,20 @@ arrays before the filter ever sees them.
 > number: the sensor's `R` is built as the very block the filter was already
 > slicing out (`make_golden_run.py:237`), so the two paths agree today and
 > only diverge once `calibrate()` runs on the arm at P6.
+>
+> **Fully resolved in P5.** `FilterRunner.ingest` takes a `Measurement` and
+> passes `m.R` into `EKF.update`, so nothing unpacks into bare arrays any
+> more. Still no number moved, for the reason above, and the golden run is
+> unchanged at `rtol=1e-12`. `test_fusion_runner.py` asserts the parameter is
+> no longer decorative — two runs differing *only* in `Measurement.R` must
+> differ in their output — which is what P6 needs before `calibrate()` can
+> mean anything.
+>
+> One piece is deliberately left: `MeasurementLog` still stores `(t, Z, rows)`
+> and drops `R`, so a run driven from a logged session rebuilds the
+> measurements with the `R` the decoder was configured with. Teaching the log
+> to carry `R` is P7's, with the config loader, and the notebook says so at the point where
+> it rebuilds them.
 
 ### 3.3 Three copies of the IMU wiring, two of which disagree
 
@@ -343,6 +375,21 @@ Fixed 2 ms predicts, `int(round(tk / dt))` for placement, a `k_now` cursor that
 never rewinds, no late-measurement branch, no counter. It assumes one sorted,
 on-time stream. A second sensor with a different latency breaks it silently —
 which is exactly the failure mode ADR-0001 § D6 was written about.
+
+> **Resolved in P5**, by `erp.fusion.FilterRunner`. The step arithmetic is
+> deliberately the *same* — `round(t / dt)` placement, a cursor that never
+> rewinds — because the golden run had to survive the move, and
+> `test_fusion_runner.py` compares the two implementations bit-for-bit to prove
+> it did. What is new is everything that happens when the assumption fails: a
+> measurement rounding to a step the filter has passed is dropped and counted
+> in `.discarded`, and `buffer_horizon` sorts streams with unequal latency
+> before ingesting them.
+>
+> The criterion is the *step*, not the timestamp. A sample stamped 0.9 ms
+> before the filter's current time still rounds to the step the filter is on
+> and is applied; the IMU's own period is 50 ± 1 ms, so counting sub-step
+> jitter as out-of-order would report drops on a stream that is merely
+> irregular.
 
 ### 3.5 Global mutable configuration
 
@@ -1041,12 +1088,12 @@ flowchart LR
     subgraph G2["Reach M2 - decoupled clocks, filter in the loop"]
         P35["P3.5<br/>core.clock<br/>Clock + RateLoop<br/>DONE"]
         P2["P2<br/>robot<br/>ArmInterface<br/>DONE"]
-        P5["P5<br/>FilterRunner<br/>online ingest"]
+        P5["P5<br/>FilterRunner<br/>online ingest<br/>DONE"]
         P35 --> P5
     end
 
     subgraph G3["Reach M3 - same code, real devices"]
-        P6["P6<br/>calibration<br/>+ R wiring"]
+        P6["P6<br/>calibration<br/>rest_bias<br/>DONE"]
         P7["P7<br/>config loader"]
         P75["P7.5<br/>runtime.session<br/>+ CI guards"]
         P6 --> P7
@@ -1064,7 +1111,7 @@ flowchart LR
     P8 --> OBJ
 
     classDef done fill:#d6f5d6,stroke:#2e7d32,stroke-width:2px,color:#1b5e20
-    class P0,P05,P1,P2,P3,P35,P4 done
+    class P0,P05,P1,P2,P3,P35,P4,P5,P6 done
 ```
 
 P8 sits outside the groups on purpose: the consistency report and the lag
@@ -1472,7 +1519,7 @@ refused `SineSweep`:
 `estimators/noise.py` (moving `make_Q`/`make_R` out of `sim/`) is in the map
 but not in this phase's text, and was left alone.
 
-**P5 — `erp.fusion.FilterRunner`.** *(M2 — this is what puts the filter in the loop)* Replace `run_imu_ekf`. Takes a `Clock` and
+**P5 — `erp.fusion.FilterRunner`. DONE.** *(M2 — this is what puts the filter in the loop)* Replace `run_imu_ekf`. Takes a `Clock` and
 a `buffer_horizon`; adds the late-measurement drop and the `discarded` counter.
 This is the module that decouples the command rate from the sensor rate (4.7),
 so it must never see a command. *Test: schedule equivalence (one 50 ms gap
@@ -1480,11 +1527,178 @@ equals 25 x 2 ms predicts), late measurements dropped and counted, two
 interleaved sensors with **unequal** latency reordered correctly — and with
 `buffer_horizon=0` that same pair must produce non-zero `discarded`.*
 
-**P6 — `erp.calibration`.** *(M3 — only real sensors have a bias worth estimating)* Move the rest-window bias out of the cell and give
+*What landed:* `erp/fusion/runner.py` — `FilterRunner`, `History`, and an
+`Estimator` protocol — plus `Belief` and `UpdateInfo` in `core/types.py`, and
+`test_fusion_runner.py` (47 tests, **no mujoco**, so the whole scheduling layer
+is in the fast loop). `scripts/make_golden_run.py` lost `run_imu_ekf` and is
+down to `estimate_lag` and `site_position_cov`, both P8's. The golden run
+reproduces at `rtol=1e-12`.
+
+The package is **English**, beside `core/`, `io/`, `sensors/` and `robot/`
+rather than beside `estimators/`. The split is physics-and-filtering against
+hardware-and-plumbing, and there is no physics in the runner: it decides *when*
+the filter steps, never what it computes.
+
+**`Belief` and `UpdateInfo` were built here, which is what P4 said should
+happen.** P4 declined them on the grounds that a type nothing reads yet is how
+`models/__init__` ended up commented out for a year. P5 is the consumer, so
+they are real now. `StateEstimator` was **not** revived: what the runner needs
+is a written record of the surface it depends on, which is a structural
+`Protocol` — the shape `ArmTransport` and `DiscreteDynamics` already use — not
+an ABC with one implementation, which 4.5 exists to refuse.
+
+**The schedule-policy question P3.5 left open is settled: `RateLoop` wins.**
+`run_trajectory` now paces off `t0 + i / rate_hz` and no longer contains a
+deadline loop of its own, nor its own achieved-rate and jitter arithmetic;
+`t_cmd` is `loop.t_actual - t0`. The duplication P3.5 created on purpose is
+closed, which was the stated condition for calling P5 done. The reasoning:
+4.7's invariant says the command period is a *scheduling parameter*, so letting
+the trajectory's span stretch the tick spacing — which is what pacing off
+`resample`'s axis does — couples the scheduler to the trajectory. `resample`
+still supplies the setpoint **values**, endpoint included, so what is commanded
+does not change; only *when*, and only when `span * rate_hz` is fractional. At
+the notebook's 3 s and 25 Hz the two agree to the last bit, so no recorded run
+moves.
+
+Three things the plan did not have:
+
+- **`advance_to(now)` silently eats measurements, and the plan's own online
+  sketch says to do it.** 4.3 draws the loop as `ingest` then "belief available
+  every tick", and the obvious implementation advances the filter to the tick's
+  time. A sensor stamps the *sample* instant and hands it over later, so a
+  filter already advanced to now is ahead of whatever arrives next and drops
+  it. Stated at its real size: the loss is **intermittent and phase-dependent**,
+  not total. The notebook's own dry run lost **1 of 61** at the SimSensor's 5 ms
+  latency; a grid over four phases finds three costing nothing and one costing
+  **10 of 40**, and at 20 ms every phase loses between a third and a half. A
+  failure that is invisible at most phases is worse than one that is loud.
+  `advance_to_safe(t_now)` — advance to `t_now - buffer_horizon` — is the fix,
+  and it is what an online loop should call.
+- **So `buffer_horizon` has a second meaning, and it is the same meaning.** 4.7
+  rule 3 introduces it as buying ordering with latency. It also says how far
+  the filter dares step, because those are one question: how far behind real
+  time the estimate runs. One parameter, both jobs.
+- **A horizon without a clock discarded everything, until the clamp.** With
+  `buffer_horizon > 0` and no `Clock`, the release watermark is the newest
+  timestamp *ingested*, so a held sample waits for its successor while `t_now`
+  marches on and the filter walks straight past it. `advance_to_safe` now also
+  refuses to step past the oldest pending sample. The cost is an extra sample
+  period of lag in that configuration — paid visibly instead of as a silent
+  drop — and it is why the reordering tests run both with and without a clock.
+
+**4.4's signature for this class is wrong in one detail and right in the other.**
+It shows `__init__(self, est, *, t0, buffer_horizon=0.0)` with no clock, while
+this phase's text above asks for one. Built: `clock` is **optional** and
+consulted only when `buffer_horizon > 0`. Without it the watermark is
+data-driven, so a run is a pure function of its input, which is what the
+offline path and the frozen fixture need; with it, held samples are also
+released once wall time passes them, which is what the online path needs.
+
+**The falsifications, and what each one is for.** `test_fusion_runner.py`
+carries the bit-identity oracle — `run_imu_ekf` copied out verbatim, compared
+with `array_equal` rather than `allclose`, because the fixture is checked at
+`rtol=1e-12` and the only honest way to hold that across a refactor is for the
+refactor to be exact — and the pairings 6 asks for. Worth recording that
+**equal** injected latencies are asserted to produce *no* reordering: they
+shift every timestamp by the same amount, so a reordering test built on them
+passes without testing anything (4.8's warning, learned from the deleted finger
+viewer).
+
+One measurement deliberately **not** pinned: the exact drop counts at latencies
+above 5 ms. Whether a given sample is lost turns on whether a command tick falls
+inside the latency window after its timestamp, so a sample within one ULP of
+that boundary flips with the arithmetic used to *build the fixture* — writing
+the sample instants as `i / 20.0` instead of `i * 0.05` moves the 20 ms counts
+by three. Asserting them would be measuring the test. The monotonicity — more
+latency never loses fewer — is a property of the runner, and that is what the
+test asserts instead.
+
+Still in the notebook and now P7.5's: `run_trajectory` itself. It cannot move
+into `fusion/`, which must not import `sensors/` or `robot/`; a function that
+takes an arm *and* sensors is Layer 3.5 by 4.2, which is `runtime/`.
+`STREAM_RATE_HZ` and `STREAM_SPEED` are still cell globals, but they are passed
+by argument rather than reached into, so they are configuration for P7 and not
+the mutable-global problem of 3.5.
+
+**P6 — `erp.calibration`. DONE.** *(M3 — only real sensors have a bias worth estimating)* Move the rest-window bias out of the cell and give
 it the `valid` / `note` shape of `calibration_from_samples`, fed
 `expected_rest = h(x_rest)` so it estimates accelerometer bias properly instead
-of subtracting a pose-specific offset. Wire `Measurement.R` through
-`FilterRunner` into `EKF.update`, closing 3.2.
+of subtracting a pose-specific offset. ~~Wire `Measurement.R` through
+`FilterRunner` into `EKF.update`, closing 3.2.~~ *That half landed at P5; this
+phase's scope was only the first sentence.*
+
+*What landed:* `erp/calibration/rest.py` — `calibration_from_samples` (moved
+here from `sensors/imu_serial.py`, which re-exports it so no caller changed)
+and a new `rest_bias`, the offline counterpart of
+`SerialIMUSensor.calibrate()`: a live sensor is told *when* to hold still, a
+recorded run has to be told where to look. `test_calibration.py` (11 tests, 9
+of them fast). The golden run reproduces at `rtol=1e-12`.
+
+The package imports `erp.core` and numpy and **nothing else in `erp`**;
+`sensors/` imports it, never the reverse. That is deliberate: a `calibration`
+module reaching back into `sensors` is one of the indirect violations the CI
+import grep cannot see. English, beside `sensors/`, matching `CODEOWNERS`.
+
+**The relocation was not free, and three things had to be decided rather than
+assumed.** Measured against the committed log before writing any of it:
+
+| | measured |
+|---|---|
+| accelerometer channels, cell vs `calibration_from_samples` | `0.000e+00` — already identical |
+| gyro channels | differ by exactly `h_rest[gyro]`, max **2.352e-4 rad/s** = **4.7% of `sig_gyro`** |
+| rest window | **8 samples** (0.4 s at ~20 Hz) against a `min_samples` default of 20 |
+| window gyro std / norm | 0.0013 of a 0.02 limit; 0.0163 of a 0.05 limit |
+| calibrated σ ÷ nominal σ | **0.13 – 0.39**, i.e. 3–8× tighter |
+
+1. **`expected_rest` now applies to every channel, gyro included.** It used to
+   steer only the accelerometer, the gyro always being measured against zero.
+   The pipeline passes `h(x_rest)`, whose gyro entries are *not* zero but up to
+   2.4e-4 rad/s — residual velocity `warmup_to_rest` leaves after 100 steps.
+
+   **Which is right is a real question, and it was answered conservatively.** A
+   resting gyro *should* read 0, so `h(x_rest)[gyro]` is a **model** artifact
+   being folded into a **sensor** bias, and expecting zero is the better
+   physics. Adopting it moves the frozen run by 4.7% of a sigma on two
+   channels, which is a deliberate regeneration and not a refactor, so it was
+   not adopted. Zeroing the gyro entries of `expected_rest` is all it takes
+   whenever someone decides to. The change broke **none** of the 19 existing
+   calibration tests: the only one passing `expected_rest` sets its gyro
+   entries to zero, where `mean - 0 == mean`.
+2. **`rest_bias` defaults `min_samples` to 3, not 20.** The live default suits
+   a 2 s standstill on the bench (~40 samples). Used offline it rejects every
+   run — and rejects it by returning a **zero bias** alongside `valid=False`,
+   which is indistinguishable from success to anything that does not check the
+   flag. That is the shape of the failure the phase's falsification is about.
+3. **Both stillness guards now apply**, the window's gyro-vector norm (the
+   cell's) and the per-channel standard deviation (the function's). They catch
+   different things — a slow sweep whose scatter stays small, versus jitter
+   whose mean cancels — and on the golden window both pass with margin.
+
+**The bias is applied through the decoder, not subtracted afterwards.**
+`imu_decoder.b = cal.bias` followed by re-decoding is exactly what
+`apply_calibration` does on the live sensor, so offline and live now share one
+mechanism instead of one of them subtracting after the fact. It is bit-identical
+(`IMUDecoder.apply` computes `raw @ axis_map - b`, the same expression in the
+same order) and it is the reason the log is stored **raw** in the first place.
+It also retires P5's `replace(m, z=m.z - imu_bias)`.
+
+**The calibrated `R` is computed and used nowhere, on purpose.** §6's
+obligation is that a calibrated `R` *changes* the filter's NIS — this is the
+first phase whose success criterion is that numbers move, in a tree whose
+standard is that they do not. The resolution: the obligation is discharged by
+tests, and neither the pipeline nor the notebook adopts the value. The reason
+is not caution but evidence — an `R` from a **static** window is the noise
+floor at rest, 3–8× tighter than nominal, carrying nothing about the noise in
+motion and nothing about model error. This arm's problem *is* model error: a
+~395 ms transport lag the blind model does not have, with NIS already at 29
+against a target of 12. Narrowing `R` would make that strictly worse, and
+`test_a_calibrated_R_would_make_the_filter_worse_on_real_data` asserts the
+direction so the finding is recorded rather than remembered.
+
+**Still open, deliberately:** `MeasurementLog` stores `(t, Z, rows)` and drops
+`R`, so a run driven from a logged session rebuilds its measurements with the
+decoder's `R` and subtracts the bias rather than re-decoding. Teaching the log
+to carry `R` is P7's, and the notebook says so at the line where it matters.
 
 **P7 — `erp.io.config`.** *(M3)* YAML into dataclasses, with `build_decoder()` and
 `build_sensor()`. Make `config/estimation.yaml` the only wiring definition; fix
@@ -1539,8 +1753,8 @@ A phase is not done until its row passes.
 | P3 | `sine_sweep` is **bit-identical** to the notebook formula, and the golden pipeline calls it | a missing chain-rule factor must fail the velocity test (which guards a *plot* — see 5.2) | **done, reshaped** |
 | P3.5 | `RateLoop` holds absolute deadlines under both clocks; its schedule equals `run_trajectory`'s for the notebook's config | a cumulative `sleep(1/rate)` loop must drift past the bound (65.4 ms vs 0.86 ms) | **done** |
 | P4 | EKF equals a closed-form KF on a linear model, no mujoco (checked in a subprocess) | a plain `(I-KH)P` update must fail the round-off case (min eig −3.6e-17 vs +5.0e-19) | **done** |
-| P5 | 25 x 2 ms predicts equal one 50 ms advance | out-of-order input increments `.discarded` | not started |
-| P6 | calibrated `R` changes the filter's NIS | an invalid calibration must be refused | not started |
+| P5 | 25 x 2 ms predicts equal one 50 ms advance | out-of-order input increments `.discarded`; **equal** injected latencies must NOT reorder; `advance_to(now)` must lose the samples `advance_to_safe` keeps | **done** |
+| P6 | calibrated `R` changes the filter's NIS | an invalid calibration must be refused, not returned as a zero bias; and `rest_bias` reproduces the cell bit-for-bit | **done** |
 | P7 | config round-trips to `IMUDecoder`; rows contiguous | the swapped wiring must produce a worse fit | not started |
 | P7.5 | M1 and M2 agree on the same log; one driver runs all three | **equal** injected latencies must NOT produce reordering | not started |
 | P8 | `ConsistencyReport` reproduces the notebook's NIS median | a constant-`Q` variant must fail the same check | not started |
@@ -1554,8 +1768,8 @@ already knows it can be wrong.
 Running the suite:
 
 ```bash
-pytest -q                    # 195 passed, 1 skipped, ~1.8 s -- everything
-pytest -q -m "not mujoco"    # 150 passed, 1 skipped, 45 deselected, ~0.9 s
+pytest -q                    # 242 collected; see the header note on the 12 golden failures
+pytest -q -m "not mujoco"    # 197 passed, 1 skipped, 45 deselected, ~3.4 s
 ```
 
 The `mujoco` marker means "needs mujoco **and** the Git-LFS model assets",
