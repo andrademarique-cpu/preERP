@@ -12,7 +12,7 @@ def make_spd(P: np.ndarray, rel: float = 1e-12) -> np.ndarray:
     P = 0.5 * (P + P.T)
     w, V = np.linalg.eigh(P)
     w = np.maximum(w, max(w.max(), 0.0) * rel + 1e-300)
-    return (V * w) @ V.T
+    return np.asarray((V * w) @ V.T, dtype=np.float64)
 
 
 def nees_of(error: np.ndarray, covariance: np.ndarray) -> float:

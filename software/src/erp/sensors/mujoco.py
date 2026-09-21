@@ -1,6 +1,7 @@
 # software/src/erp/sensors/mujoco.py
-import numpy as np
 import mujoco as mj
+import numpy as np
+
 
 def sensor_slice(name: str, model: mj.MjModel) -> slice:
     """Returns the slice of sensordata (and H) occupied by a specific sensor."""

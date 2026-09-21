@@ -17,7 +17,14 @@ jobs:
         # what makes the declared support range true rather than aspirational.
         python-version: ["3.10", "3.11"]
     steps:
+      # lfs: true is required, not tidiness. The golden run (ADR-0002 P0.5)
+      # loads three LFS-tracked things: the STL meshes MyPalletizer260.xml
+      # references, data/raw/imu_trajectory_raw.csv, and the fixture itself
+      # under data/processed/. Without this, checkout writes 130-byte pointer
+      # files and MuJoCo fails to compile the model.
       - uses: actions/checkout@v4
+        with:
+          lfs: true
 
       - uses: actions/setup-python@v5
         with:

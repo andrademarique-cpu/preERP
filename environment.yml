@@ -25,10 +25,12 @@ dependencies:
       # file lives there and already points setuptools at software/src. There
       # is no pyproject.toml under software/, so "-e ./software" cannot work.
       #
-      # dev = pytest/mypy/ruff, viz = matplotlib. The viewer under scripts/
-      # needs mujoco, pyqtgraph, PyQt5 and pyserial, which are deliberately
-      # NOT installed here -- the estimation core and its tests need none of
-      # them. Add them only if you intend to run the app:
+      # dev = pytest/mypy/ruff, viz = matplotlib. numpy and mujoco come in as
+      # core dependencies -- mujoco is not optional, it IS the process and
+      # measurement model. Device access (pyserial for the Teensy, pymycobot
+      # for the arm) is the `app` extra and is deliberately NOT installed here:
+      # the package and its tests import cleanly without it. Add it only if you
+      # intend to drive real hardware:
       #
       #     pip install -e ".[app]"
       #

@@ -37,7 +37,7 @@ setuptools at `software/src`. `-e "./software[dev]"` cannot work.
 
 ```bash
 git lfs install
-pip install -e ".[dev]"                 # add [app] for scripts/, [viz] for matplotlib
+pip install -e ".[dev]"                 # add [app] for hardware, [viz] for matplotlib
 ruff check software/src software/tests  # `ruff check .` is not what CI runs
 mypy software/src                       # bare `mypy` has no target configured
 pytest -q

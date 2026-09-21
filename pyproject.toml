@@ -9,9 +9,20 @@ description = "Multi-sensor state estimation stack for robotic hands (KF/EKF/UKF
 readme = "README.md"
 requires-python = ">=3.10"
 license = { text = "MIT" }
+# mujoco is a HARD dependency, not an extra: `erp.sim.mujoco`, `erp.sensors.mujoco`
+# and `erp.estimators.ekf` import it at module scope, because MuJoCo *is* the
+# process and measurement model (it supplies f, F, h and H via mj_step and
+# mjd_transitionFD). While it sat in the [app] extra, CI installed `.[dev]` and
+# then type-checked a tree whose central dependency was absent.
+#
+# Floored at 3.11: that is the version the documented results were produced on,
+# and MjSpec (used to build the blind filter model) is only stable from there.
+#
+# scipy was removed here -- nothing has imported it since models/discretize.py
+# was deleted. Re-add it if a van Loan discretisation comes back.
 dependencies = [
     "numpy",
-    "scipy",
+    "mujoco>=3.11",
 ]
 
 [project.optional-dependencies]
@@ -28,16 +39,14 @@ dev = [
 viz = [
     "matplotlib",
 ]
-# Dependencies of the applications under scripts/ (the live finger viewer),
-# not of the erp package itself -- the estimation core stays importable with
-# only numpy/scipy. mujoco is floored at 3.11 because mj_fullM changed
-# signature there (it now takes MjData and writes into dst); see
-# scripts/finger_viewer.py:joint_params_from_plant.
+# Device access, needed only to talk to real hardware. pyserial is imported
+# lazily inside SerialIMUSensor._open, and pymycobot only by the arm driver in
+# notebooks/mypalletizer260EKF.ipynb, so the package and its tests import
+# cleanly without either. pyqtgraph/PyQt5 used to be here for
+# scripts/finger_viewer.py, which no longer exists.
 app = [
-    "mujoco>=3.11",
-    "pyqtgraph",
-    "PyQt5",
     "pyserial",
+    "pymycobot",
 ]
 
 # This is the ONLY packaging file in the repo, and it already points setuptools
@@ -49,17 +58,29 @@ where = ["software/src"]
 
 [tool.pytest.ini_options]
 testpaths = ["software/tests"]
+# Most of the suite runs in ~0.4 s against a fake serial port and needs neither
+# hardware nor mujoco. `mujoco` marks the tests that do: they import mujoco AND
+# load MyPalletizer260.xml, which pulls STL meshes out of Git LFS, so they
+# cannot run off a checkout made without LFS (this is why CI now checks out with
+# lfs: true). They stay in the default run -- test_golden_run.py is M1's
+# acceptance test and deselecting it would defeat the point of freezing the run
+# at all. `pytest -m "not mujoco"` is the quick loop.
+markers = [
+    "mujoco: needs mujoco and the Git-LFS model assets; not part of the fast suite",
+]
 
 [tool.mypy]
 python_version = "3.10"
 strict = true
 mypy_path = "software/src"
 
-# scipy ships no type stubs; erp only uses scipy.linalg.expm, and every call
-# site wraps the result in np.asarray(..., dtype=np.float64) so the untyped
-# boundary does not leak Any into the estimation core.
+# mujoco ships no py.typed marker, so every `mj.*` attribute is Any. That is
+# tolerable only because the boundary is narrow: erp.sim.mujoco is the single
+# module that calls into it, and each of its functions wraps the result in
+# np.asarray(..., dtype=np.float64) or int(...) before returning, so no Any
+# leaks into the estimator. Keep that discipline when adding a function there.
 [[tool.mypy.overrides]]
-module = "scipy.*"
+module = ["mujoco", "mujoco.*"]
 ignore_missing_imports = true
 
 # pyserial ships no stubs and is only in the [app] extra (absent in CI). It is
@@ -67,6 +88,13 @@ ignore_missing_imports = true
 # LineTransport-typed attribute, so no Any escapes into the sensor code.
 [[tool.mypy.overrides]]
 module = ["serial", "serial.*"]
+ignore_missing_imports = true
+
+# pymycobot, same arrangement: no stubs, [app] only, imported lazily inside
+# MyPalletizerArm.__init__ and immediately assigned to an ArmTransport-typed
+# attribute. That Protocol is the written record of the surface we depend on.
+[[tool.mypy.overrides]]
+module = ["pymycobot", "pymycobot.*"]
 ignore_missing_imports = true
 
 [tool.ruff]

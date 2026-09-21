@@ -342,20 +342,26 @@ there is no second list to keep in sync.
 
 | Extra | Pulls in | You need it for |
 |---|---|---|
-| *(none)* | numpy, scipy | importing `erp`, running estimators |
+| *(none)* | numpy, **mujoco** | importing `erp`, running estimators |
 | `dev` | pytest, mypy, ruff | the checks below |
 | `viz` | matplotlib | plotting in notebooks |
-| `app` | mujoco, pyqtgraph, PyQt5, pyserial | `scripts/finger_viewer.py` only |
+| `app` | pyserial, pymycobot | talking to real hardware |
 
 `conda env create` installs `[dev,viz]`. The `app` stack is deliberately
-left out — the estimation core and its tests need none of it, and that is
-the point of § 3. Add it only if you intend to run the viewer:
+left out — the package and its tests import cleanly without it, and that
+is the point of § 3. Add it only to drive the real arm or the Teensy:
 
 ```bash
 pip install -e ".[app]"
-python scripts/finger_viewer.py            # synthetic input, no hardware
-python scripts/finger_viewer.py --pot --port COM5   # real potentiometers
 ```
+
+**mujoco is a core dependency, not an extra.** MuJoCo *is* the process and
+measurement model — `erp.sim.mujoco` supplies `f`, `F`, `h` and `H` from
+`mj_step` and `mjd_transitionFD` — so `erp.estimators` cannot import
+without it. It was in `app` until ADR-0002 phase P0, which meant CI
+installed `.[dev]` and then type-checked a tree whose central dependency
+was absent. `scipy` came out at the same time: nothing has imported it
+since `models/discretize.py` was deleted.
 
 ### Checks
 
