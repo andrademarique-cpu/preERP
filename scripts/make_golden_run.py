@@ -44,14 +44,15 @@ from typing import Any
 import mujoco as mj
 import numpy as np
 
+from erp.analysis import consistency_report, estimate_lag, propagate_to_site
 from erp.calibration import rest_bias
 from erp.estimators import EKF
 from erp.fusion import FilterRunner
 from erp.io.paths import repo_root, resolve_repo_path
 from erp.sensors import IMUDecoder, ReplaySensor
 from erp.sensors.mujoco import make_R, rows_of
-from erp.sim.mujoco import H_dyn, h_dyn, make_Q
 from erp.sim.dynamics import MujocoDynamics
+from erp.sim.mujoco import h_dyn, make_Q
 from erp.sim.plant import blind_variant, load_model, warmup_to_rest
 from erp.trajectory import sine_sweep
 
@@ -97,56 +98,6 @@ SIG_ACT_BLIND = 5e-3    # rad por paso: random walk de la activacion
 SIG_CM = 1e-4           # rad por paso a lo largo del modo comun (q_j, a_j)
 REST_S = 0.4            # s: ventana quieta al principio del log
 REST_GYRO_MAX = 0.05    # rad/s: si la norma del gyro pasa esto, NO es reposo
-
-
-# --- funciones levantadas del notebook, sin cambios ------------------------
-
-
-def estimate_lag(t_ref, q_ref_deg, t_meas, q_meas_deg, max_lag_s=0.6, n=241):
-    """Retardo, en s, que mejor alinea la medida con la consigna (RMS minimo).
-
-    Positivo = la medida va ATRASADA respecto de la consigna. Se barre el
-    retardo y se interpola la consigna corrida sobre los sellos de tiempo
-    REALES de la medida, no sobre los nominales. Solo se usan las muestras que
-    caen dentro de la ventana valida, para que el arranque no invente
-    correlacion donde no la hay.
-    """
-    if len(t_meas) < 4:
-        return float("nan")
-    inside = (t_meas >= t_ref[0] + max_lag_s) & (t_meas <= t_ref[-1])
-    if inside.sum() < 4:
-        return float("nan")
-    tm, qm = t_meas[inside], q_meas_deg[inside]
-    best, best_lag = np.inf, float("nan")
-    for lag in np.linspace(0.0, max_lag_s, n):
-        ref = np.column_stack([np.interp(tm - lag, t_ref, q_ref_deg[:, k])
-                               for k in range(q_ref_deg.shape[1])])
-        rms = float(np.sqrt(np.mean((qm - ref) ** 2)))
-        if rms < best:
-            best, best_lag = rms, lag
-    return best_lag
-
-
-def site_position_cov(XH, PP, model, data, rows):
-    """Posicion de un sensor `framepos` y su covarianza, propagada desde el estado.
-
-    p = h(x)[rows],   Sigma_p = H P H^T   con   H = dh/dx [rows]   (3 x nx)
-
-    Covarianza COMPLETA, no sqrt(diag(P)) junta por junta: el efector depende de
-    las tres juntas a la vez y las correlaciones que el filtro tiene entre ellas
-    cambian la banda. H es la misma diferencia finita que usa el filtro; su
-    bloque de q coincide con mj_jacSite a 3e-8.
-
-    -> p (N, 3) m, marco mundo;  C (N, 3, 3) m^2
-    """
-    u = np.zeros(model.nu)
-    p = np.empty((len(XH), 3))
-    C = np.empty((len(XH), 3, 3))
-    for i, (x, P) in enumerate(zip(XH, PP)):
-        p[i] = h_dyn(x, u, model, data)[rows]
-        H = H_dyn(x, u, model, data)[rows]
-        C[i] = H @ P @ H.T
-    return p, C
 
 
 # --- la corrida ------------------------------------------------------------
@@ -314,7 +265,7 @@ def run_pipeline(
     # fixture congelo, y las cuentas de abajo no son comparables.
     if hist.discarded:
         raise RuntimeError(f"{hist.discarded} mediciones descartadas por llegar tarde")
-    p_ef, C_ef = site_position_cov(XH_ekf, PP_ekf, model_blind, data_blind, ef_rows)
+    p_ef, C_ef = propagate_to_site(XH_ekf, PP_ekf, model_blind, data_blind, ef_rows)
     sig_ef = np.sqrt(np.einsum("nii->ni", C_ef))      # (N, 3) m, 1 sigma por eje del mundo
     wall_s = time.perf_counter() - t_start
 
@@ -347,6 +298,14 @@ def run_pipeline(
         print(f"retardo brazo vs MuJoCo (gyro): {lag_imu * 1e3:.0f} ms")
         print(f"NIS en movimiento ({moving.sum()} muestras, objetivo {len(imu_rows)}): "
               f"media {out['nis_mean_moving']:.1f}, mediana {out['nis_median_moving']:.1f}")
+        # El veredicto de P8 sobre la MISMA ventana. warmup_fraction=0.0 porque
+        # `moving` ya recorto el reposo inicial: el default de 0.5 volveria a
+        # cortar por la mitad lo ya cortado y el numero dejaria de ser el que el
+        # fixture congela. Sin verdad de estado -- esto es el brazo real -- asi
+        # que NEES sale None, que es el caso que `consistency_report` existe
+        # para no falsear con un cero.
+        print(consistency_report(NIS_ekf[moving], nz=len(imu_rows),
+                                 warmup_fraction=0.0).summary())
         print("sigma del efector [mm] x/y/z, mediana:",
               np.round(out["sig_ef_median_mm"], 1))
         print("juntas al final [deg] (rot, link1, link2):",

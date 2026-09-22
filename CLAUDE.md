@@ -38,13 +38,13 @@ conda env create -f environment.yml     # installs -e .[dev,viz]; already satisf
 
 # The checks CI runs, in the order ci.yml runs them. Timings on this machine.
 ruff check software/src software/tests  # clean; rule set pinned via [tool.ruff.lint] select
-mypy software/src                       # strict; clean (37 files)
+mypy software/src                       # strict; clean (44 files)
 grep -rEl ...                           # import-direction, the 3rd step -- BEFORE pytest
-pytest -q                               # 277 passed, 1 skipped, ~2.6 s -- green
+pytest -q                               # 310 passed, 1 skipped, ~3.0 s -- green
 
 # The fast loop while working. `mujoco` marks the tests that need mujoco AND
 # the Git-LFS model assets -- that shared requirement, not what they assert.
-pytest -q -m "not mujoco"               # 227 passed, 1 skipped, 50 deselected, ~1.7 s -- green
+pytest -q -m "not mujoco"               # 258 passed, 1 skipped, 52 deselected, ~2.1 s -- green
 
 # The golden check. Not a separate CI step: `test_golden_run.py` imports
 # `run_pipeline` from this script, so `pytest` covers it. Run it directly
@@ -110,10 +110,11 @@ accurate about this.
 **Run the golden check before and after any change to the estimation
 path.** `data/processed/golden_ekf_run.npz` is a frozen end-to-end run of
 the filter over the committed IMU log, and `--check` re-runs the pipeline
-and diffs it at `rtol=1e-12`. Eight phases of refactoring have moved code
+and diffs it at `rtol=1e-12`. Ten phases of refactoring have moved code
 under it — the trajectory generator, the blind-model build, the rest
-state, the whole EKF, at P5 the filter loop and at P6 the rest-window
-calibration — without moving one digit, and that is the only reason any
+state, the whole EKF, at P5 the filter loop, at P6 the rest-window
+calibration, at P7 the wiring definition and at P8 the lag estimator and
+the site propagation — without moving one digit, and that is the only reason any
 of it can be believed. If it fails after a refactor, the
 refactor changed the numbers; do not regenerate the fixture to make it
 pass. Regenerating is a deliberate act that needs saying out loud.
@@ -561,9 +562,10 @@ re-derive. Each has a test that would fail if it stopped being true.
 | `software/src/erp/io/` | `log` (`MeasurementLog`), `paths` (`repo_root`, `resolve_repo_path`, `resolve_model_path`), `config` (P7 — `load_config`, `build_decoder`, the frozen config dataclasses, `ConfigError`). **English** | `core/` only for `log`/`paths`. `config` imports `sensors.IMUDecoder`, so it is deliberately **not** re-exported from `io/__init__.py` — `import erp.io` must stay core-only, because `fusion/` may import `erp.io` and may never reach `sensors/`. A subprocess test pins it |
 | `software/src/erp/fusion/` | `runner` — `FilterRunner` (timestamps → filter steps), `History`, `Estimator` protocol. **English**, beside `core/`/`io/`, not beside `estimators/`: it decides *when* the filter steps, never what it computes. Landed at P5; the old `FusionEngine` it replaces was deleted and shares no design with it | builds on `core/` + `models/`; **never** `sensors/`, `robot/` or a wall clock |
 | `software/src/erp/calibration/` | `rest` — `calibration_from_samples` (moved here from `sensors/imu_serial.py` at P6, still re-exported there), `rest_bias` (the offline counterpart of `SerialIMUSensor.calibrate`). **English** | `core/` + numpy **only**; `sensors/` imports this, never the reverse |
-| `software/src/erp/viz/` | **empty** (P8). `__init__.py` carries a one-line docstring ("Plotting and visualisation helpers. Geometry only, no backend imports.") and nothing else — honor that "no backend imports" when P8 lands | — |
-| `software/tests/` | 278 tests. `conftest` (fake serial port + IMU layout), `test_sensor_contract` (one suite over all three `Sensor`s), `test_imu_serial`, `test_clock`, `test_replay_log`, `test_paths`, `test_plant`, `test_golden_run`, `test_robot`, `test_trajectory`, `test_core_clock`, `test_dynamics`, `test_ekf_linear`, `test_fusion_runner` (47, no mujoco — carries a verbatim copy of the old `run_imu_ekf` as a bit-identity oracle), `test_calibration` (11, 9 of them fast — same oracle trick against notebook cell 19's block), `test_config` (24, 21 of them fast — every malformed-config case paired with the good file it mutates) | — |
-| `scripts/` | `make_golden_run.py` — generates and re-checks the golden fixture. A **holding pen**: `run_imu_ekf` left at P5, so what remains is `estimate_lag` and `site_position_cov`, both P8's. When they go, M1 closes | not linted by CI |
+| `software/src/erp/analysis/` | `lag` (`estimate_lag`), `site` (`propagate_to_site`), `consistency` (`ConsistencyReport`, `consistency_report`). Landed at P8. **Spanish** — forced: § 5.3 required moving the first two with their Spanish docstrings intact | `core/` + `sim/`; imports mujoco (via `h`/`H`), so a test that exercises it end to end carries the `mujoco` marker |
+| `software/src/erp/viz/` | `geometry` (`sigma_per_axis`, `ellipsoid_axes`, `principal_tilt_deg` — pure numpy), `theme`, `figures` (`three_way`, `sensor_compare`, `effector_band`). Landed at P8; the old "geometry only, no backend imports" rule was overturned by ADR-0002 § 4.2. **English** | matplotlib allowed, gated behind `[viz]`. `__init__.py` re-exports **only** `geometry`, so `import erp.viz` stays numpy-only and CI (which installs `.[dev]`) can import it |
+| `software/tests/` | 311 tests. `conftest` (fake serial port + IMU layout), `test_sensor_contract` (one suite over all three `Sensor`s), `test_imu_serial`, `test_clock`, `test_replay_log`, `test_paths`, `test_plant`, `test_golden_run`, `test_robot`, `test_trajectory`, `test_core_clock`, `test_dynamics`, `test_ekf_linear`, `test_fusion_runner` (47, no mujoco — carries a verbatim copy of the old `run_imu_ekf` as a bit-identity oracle), `test_calibration` (11, 9 of them fast — same oracle trick against notebook cell 19's block), `test_config` (24, 21 of them fast — every malformed-config case paired with the good file it mutates), `test_analysis` (20 — verbatim oracles for the two moved functions, plus a broken variant per metric), `test_viz` (13 — the ellipse arithmetic runs always, the figures skip without `[viz]`) | — |
+| `scripts/` | `make_golden_run.py` — generates and re-checks the golden fixture. **Emptied at P8**: it now holds `run_pipeline`, `_metadata` and `main` and nothing else, i.e. configuration and a call. `demo_three_way.py` — the live three-way demo (plant truth vs noisy virtual sensor vs EKF estimate), P8's acceptance artifact. Both **Spanish** | not linted by CI |
 | `data/processed/` | `golden_ekf_run.npz` — the frozen run. Git-LFS | — |
 | `notebooks/` | `mypalletizer260EKF.ipynb` — **the driver application**; `viewer.ipynb` (MuJoCo viewer + `SimLog`); `finger_imu_toolkit.ipynb` (finger EKF rebuilt on `erp`); `finger_imu_practice.ipynb`, `Palletizer.ipynb` (reference) | may import anything |
 | `mechanical/mujoco_assets/` | `MyPalletizer260/MyPalletizer260.xml` + STL meshes, `axis_xyz.xml` — the model everything runs on | — |
@@ -677,14 +679,15 @@ over recorded MuJoCo output, `ClockSync`), `MeasurementLog`, the MuJoCo
 `f/F/h/H` helpers and their paired forms, `erp.sim.plant`,
 `erp.robot`, `erp.trajectory`, `erp.core.clock`, the
 `DiscreteDynamics` seam, the blind EKF, `erp.fusion.FilterRunner`,
-`erp.calibration`, `erp.io.config`, and the palletizer notebook end
-to end (trajectory → real arm + MuJoCo replay → IMU log → EKF →
-end-effector covariance). 278 tests collected; **277 pass, 1 skipped**,
-`ruff` and `mypy --strict` (37 files) are clean, `pytest -m "not
-mujoco"` is green (227 passed, 1 skipped, 50 deselected), and
+`erp.calibration`, `erp.io.config`, `erp.analysis`, `erp.viz`, the
+three-way demo (`scripts/demo_three_way.py`), and the palletizer notebook
+end to end (trajectory → real arm + MuJoCo replay → IMU log → EKF →
+end-effector covariance). 311 tests collected; **310 pass, 1 skipped**,
+`ruff` and `mypy --strict` (44 files) are clean, `pytest -m "not
+mujoco"` is green (258 passed, 1 skipped, 52 deselected), and
 `make_golden_run.py --check` reproduces the fixture at `rtol=1e-12`.
 
-**ADR-0002 phases P0, P0.5, P1, P2, P3, P3.5, P4, P5, P6 and P7 are done.** Read
+**ADR-0002 phases P0 through P8 are done — every phase except P7.5.** Read
 `docs/adr/0002-notebook-to-package.md` before starting any of the rest:
 each finished phase carries a *What landed* record, including where the
 plan turned out to be wrong and was changed on purpose (P3 was reshaped
@@ -709,7 +712,7 @@ package*, not a script, to reproduce the golden run, plus a
 left in `scripts/make_golden_run.py` is `estimate_lag` and
 `site_position_cov` — both P8's. **M1 now closes at P8 alone.**
 
-Not built: `viz/`, `analysis/`, `runtime/`, `ros2_ws/`, and any UKF.
+Not built: `runtime/`, `ros2_ws/`, and any UKF.
 Online fusion exists
 (`erp.fusion.FilterRunner`) but has only been run against `DryRunArm` +
 `SimSensor`, never against the Teensy.
@@ -817,7 +820,7 @@ Assume these are historical unless you have checked against the source:
   hardware (the objective). Each phase is tagged with the milestone it
   serves.
 
-  **Two phases remain, and neither blocks the other.** **P7.5**
+  **One phase remains: P7.5.**
   (`erp.runtime.session`: `Mode`, `Session`, `build_session`, the two CI
   greps of § 4.8, M2 fault injection — plus `build_sensor()`, moved out
   of P7 because only that module may name a driver class, and

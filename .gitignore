@@ -23,3 +23,11 @@ env/
 Thumbs.db
 .vscode/
 .idea/
+
+# Figures written by scripts/demo_three_way.py. Regenerable output, and
+# data/processed/** is Git-LFS tracked -- committing them would push a new
+# binary on every run.
+data/processed/figures/
+
+# MuJoCo writes this next to the working directory whenever a model loads.
+MUJOCO_LOG.TXT

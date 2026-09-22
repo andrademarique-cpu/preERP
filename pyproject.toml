@@ -116,6 +116,16 @@ ignore_missing_imports = true
 module = ["yaml", "yaml.*"]
 ignore_missing_imports = true
 
+# matplotlib DOES ship py.typed, so locally mypy reads its real signatures. This
+# override exists for CI, which installs .[dev] without [viz] and would
+# otherwise fail to find the module at all. The asymmetry is deliberate and
+# narrow: only erp.viz.theme and erp.viz.figures import it, both are withheld
+# from erp/viz/__init__.py, and erp.viz.geometry -- the half with arithmetic
+# worth checking -- is pure numpy and typed either way.
+[[tool.mypy.overrides]]
+module = ["matplotlib", "matplotlib.*"]
+ignore_missing_imports = true
+
 [tool.ruff]
 line-length = 100
 src = ["software/src"]

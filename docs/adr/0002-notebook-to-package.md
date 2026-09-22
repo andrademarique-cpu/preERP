@@ -1123,12 +1123,12 @@ flowchart LR
     P5 --> P6
     P2 --> P7
     P3 --> P7
-    P5 --> P8["P8<br/>analysis + viz<br/>serves all three"]
+    P5 --> P8["P8<br/>analysis + viz<br/>serves all three<br/>DONE"]
     P75 --> OBJ(["M3 achieved<br/>the objective"])
     P8 --> OBJ
 
     classDef done fill:#d6f5d6,stroke:#2e7d32,stroke-width:2px,color:#1b5e20
-    class P0,P05,P1,P2,P3,P35,P4,P5,P6,P7 done
+    class P0,P05,P1,P2,P3,P35,P4,P5,P6,P7,P8 done
 ```
 
 P8 sits outside the groups on purpose: the consistency report and the lag
@@ -1804,10 +1804,90 @@ log agree to tolerance; the same driver function runs unmodified against a
 M3 session built on `FakePort` plus a fake arm transport; M1 with a
 `StreamSensor` raises at construction rather than hanging.*
 
-**P8 — `erp.analysis` + `erp.viz`.** *(all three — this is how a milestone is measured)* `estimate_lag`; a `ConsistencyReport`
+**P8 — `erp.analysis` + `erp.viz`. DONE.** *(all three — this is how a milestone is measured)* `estimate_lag`; a `ConsistencyReport`
 carrying NEES / NIS / coverage (median, not mean; second-half window — lift the
 logic from `finger_imu_toolkit.report`); `propagate_to_site`; the plot theme and
 the three standard figures.
+
+*What landed:* `erp/analysis/` — `lag.estimate_lag` and `site.propagate_to_site`
+(both moved out of `scripts/make_golden_run.py` under § 5.3, bodies untouched)
+and `consistency.py` (`ConsistencyReport`, `consistency_report`). `erp/viz/` —
+`geometry` (`sigma_per_axis`, `ellipsoid_axes`, `principal_tilt_deg`), `theme`
+and `figures` (`three_way`, `sensor_compare`, `effector_band`).
+`scripts/demo_three_way.py`, the live demo. `test_analysis.py` (20) and
+`test_viz.py` (13).
+
+**M1 is structurally closed.** `scripts/make_golden_run.py` now contains
+`run_pipeline`, `_metadata` and `main` and nothing else — configuration and a
+call, with every piece of the estimation path in the package. The golden check
+stayed at `rtol=1e-12` across the move, which is the ninth phase in a row to do
+so.
+
+**M1's numeric criterion is NOT met as written, and this needs a decision.** The
+table above asks for NIS 11–13 against a target of 12 and effector NEES 1.8–2.2
+against 3. Measured by `demo_three_way.py` on simulated data: **NIS median 9.59**
+(mean 11.12, n = 31 over the second half; 9.59 / 10.78 over all 61) and
+**effector NEES median 1.79**, with 2σ coverage 1.00 / 1.00 / 0.97. Both sit just
+below their bands. The NIS figure agrees exactly with the notebook's own dry run
+(9.6), so the run is reproducible; what does not agree is the band, which § 2's
+evidence row attributes to a `sig_act` sweep — a different experiment from this
+one. Either the band was recorded from that sweep and does not describe this
+configuration, or the configurations differ in a way nobody has written down.
+Resolve it before declaring M1, and do not move the band to fit the number.
+
+Four things the phase measured, three of them by getting it wrong first:
+
+- **A layout permutation applied to both sides is not a wiring error.** The
+  demo's first `--degrade swap` permuted the names handed to `rows_of`, which
+  permutes the truth *and* the measurement consistently — NIS went from 9.59 to
+  11.60, i.e. *closer* to target. A wiring error is one side only: feed link2's
+  reading into link1's slot while `rows` still says link1. Done that way it is
+  unmissable — NIS 74 725, effector NEES 911 648, coverage 0.20 / 0.16 / 0.00.
+- **Degrading `EKF.R` does nothing, because the filter uses the measurement's.**
+  `FilterRunner.ingest` passes `m.R` into `update` (P5's note, § 3.2's other
+  half). The overconfident toggle had to rebuild the `Measurement`s with a
+  declared `R` 100× too small while the noise stayed drawn from the honest one.
+  It then lands at NIS 65 530, effector NEES 12 480, coverage 0.70 / 0.40 / 0.14.
+- **The 114σ rest-state bias is a property of `h(x0)`, not of a run.** Starting
+  from the `home` keyframe instead of the servoed equilibrium reproduces the
+  recorded readings exactly — 9.810 m/s² warmed against 4.144 raw on
+  `link2_acc_x`, which the demo reports as **113 σ** on the worst channel. But
+  it does **not** degrade the run: one `mj_step` re-enforces the tendon equality
+  and pulls the state back before the first measurement arrives at 5 ms
+  (2.5 physics steps), so `--degrade zeros` leaves the NIS untouched. Saying it
+  "wrecks the filter" would be the overstatement § 6 warns against; what it
+  wrecks is the first prediction.
+- **A second-half window hides an initialisation fault by construction.** That
+  window exists to discard the P0 transient, and a bad start *lives* in the
+  transient. The demo therefore prints both windows. This is not a reason to
+  change `DEFAULT_WARMUP_FRACTION` — it is a reason to read both.
+
+Decisions worth recording:
+
+- **`erp/analysis/` is Spanish, `erp/viz/` is English.** Forced, not chosen:
+  § 5.3 requires moving `estimate_lag` and `propagate_to_site` with their
+  Spanish docstrings intact, so the package they land in follows them, and the
+  new `consistency.py` follows its siblings. `erp/viz/__init__.py` was already
+  English. A half-and-half package would be worse than either.
+- **`erp/viz/__init__.py` re-exports only the numpy half.** `theme` and
+  `figures` import matplotlib at module scope, and CI installs `.[dev]` without
+  `[viz]`. Same shape as `erp/io/__init__.py` withholding `config`.
+- **`_RC` in `theme.py` is typed `Any`.** matplotlib ships `py.typed` and types
+  `rcParams` keys as a `Literal` union, so a `dict[str, Any]` fails locally —
+  but in CI matplotlib is absent and a `type: ignore` would be flagged unused,
+  failing the other leg. `Any` is the one annotation correct in both.
+- **`strict=True` was added to two `zip` calls during the move.** ruff B905
+  demands it and `scripts/` is not linted by CI, so the rule had never been
+  applied to this code. It is also the right semantics — `XH` and `PP` come
+  from one run and a length mismatch is a bug — and on equal-length inputs it
+  changes no number. This is the only edit either body received.
+
+*Deliberately not done:* `C_ef` was **not** added to the fixture. § 4's note says
+adding the key would leave every existing array bit-identical and is therefore
+safe, and that remains true and available — `propagate_to_site` returns the full
+block and the demo uses it. It was left out because regenerating a Git-LFS
+binary is a deliberate act and this phase had no need of it. The fixture still
+stores only `sqrt(diag(C))`.
 
 ### 5.3 Migration discipline
 
@@ -1845,7 +1925,7 @@ A phase is not done until its row passes.
 | P6 | calibrated `R` changes the filter's NIS | an invalid calibration must be refused, not returned as a zero bias; and `rest_bias` reproduces the cell bit-for-bit | **done** |
 | P7 | config round-trips to `IMUDecoder`; rows contiguous | the swapped wiring must produce a worse fit (held by `test_golden_run`, which P7 links to the YAML); plus a reordered layout must break contiguity, and each malformed-config test is paired with the good file it mutates | **done, reshaped** |
 | P7.5 | M1 and M2 agree on the same log; one driver runs all three | **equal** injected latencies must NOT produce reordering | not started |
-| P8 | `ConsistencyReport` reproduces the notebook's NIS median | a constant-`Q` variant must fail the same check | not started |
+| P8 | `ConsistencyReport` reproduces the notebook's NIS median (29.10 on the golden log, 9.59 on the dry run — both exact) | an overconfident filter must fail it: `R` declared 100x too small gives NIS 65 530 against 9.59, and a one-sided wiring swap gives 74 725. A *two*-sided swap does **not** fail it, and finding that out is what made the falsification real | **done** |
 
 The "—" in P0.5's falsification column was wrong and the phase supplied one
 anyway: rebuilding the run with 3.3's swapped IMU wiring must fail to
