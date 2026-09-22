@@ -2,17 +2,23 @@
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
-Read this file before `README.md`. The README, `AGENTS.md`,
+Read this file before `README.md`. The README,
 `docs/adr/0001-multi-rate-fusion.md` and `docs/theory/finger_imu_ekf.md`
 describe the **previous** design (a 2-link finger with a hand-written LTI
 model and a `FusionEngine`), which was deleted in `1987f00`/`3ada284`.
 See "Documentation that no longer matches the code" at the bottom for
 what in them is still true.
 
-[`AGENTS.md`](./AGENTS.md) is a shorter restatement of these rules for
-non-Claude agents. Nothing keeps the two in sync, so **when you change a
-rule here, check whether `AGENTS.md` now contradicts it** — it currently
-does, in several places listed below.
+`AGENTS.md` was **deleted** (2026-09-22), not superseded. It was a
+shorter restatement of these rules with nothing keeping the two in sync,
+and it had drifted into being wrong rather than merely stale: it named
+an `erp` environment that does not exist, told agents four ABCs in
+`models/base.py` and `estimators/base.py` were the frozen contract
+(`estimators/base.py` was deleted in `1987f00`; `models/base.py` is now
+a numpy `DiscreteDynamics` protocol), and directed new estimators to be
+registered in `config/` YAML, which holds the IMU wiring and nothing
+else. This file is the only agent guide. If you re-add a second one,
+you are re-adding that drift.
 
 ## Commands
 
@@ -38,13 +44,13 @@ conda env create -f environment.yml     # installs -e .[dev,viz]; already satisf
 
 # The checks CI runs, in the order ci.yml runs them. Timings on this machine.
 ruff check software/src software/tests  # clean; rule set pinned via [tool.ruff.lint] select
-mypy software/src                       # strict; clean (44 files)
+mypy software/src                       # strict; clean (48 files)
 grep -rEl ...                           # import-direction, the 3rd step -- BEFORE pytest
-pytest -q                               # 310 passed, 1 skipped, ~3.0 s -- green
+pytest -q                               # 339 passed, 1 skipped, ~3.6 s -- green
 
 # The fast loop while working. `mujoco` marks the tests that need mujoco AND
 # the Git-LFS model assets -- that shared requirement, not what they assert.
-pytest -q -m "not mujoco"               # 258 passed, 1 skipped, 52 deselected, ~2.1 s -- green
+pytest -q -m "not mujoco"               # 284 passed, 1 skipped, 55 deselected, ~2.5 s -- green
 
 # The golden check. Not a separate CI step: `test_golden_run.py` imports
 # `run_pipeline` from this script, so `pytest` covers it. Run it directly
@@ -170,6 +176,16 @@ and a config file is not device access. It is pure Python and installs
 everywhere, so none of the reasons that keep `pyserial` and `pymycobot`
 in `[app]` apply to it.
 
+**`pyqtgraph` + `PyQt5` are the `[live]` extra, added for the teleop demo.**
+Not folded into `[viz]`: that is matplotlib, and this is a different
+backend for a different job. matplotlib redraws a whole figure and
+cannot hold a 30 Hz strip, which makes the viewer stutter in a way that
+reads as a physics problem. Both are already installed in `EKF`, and
+`pyproject.toml` has carried a comment since P0 about pyqtgraph having
+been a dependency here once. Nothing in `erp/` imports either at package
+scope — `erp/viz/__init__.py` withholds `erp.viz.live` — so a tree
+without them imports and tests clean, which is what CI runs.
+
 **Dependencies are declared once, in `pyproject.toml`.**
 `environment.yml` supplies only the interpreter and pip, then installs
 `-e .[dev,viz]`. Do not re-add package lists to `environment.yml`: the
@@ -253,14 +269,24 @@ precisely: `estimators/ekf.py` no longer imports mujoco. It holds a
 `DiscreteDynamics` — a numpy-only protocol — so the filter runs against
 `LinearDynamics` with mujoco absent from `sys.modules` entirely, which is
 how it gets compared to a closed-form Kalman filter. `models/` and
-`core/` are mujoco-free and must stay that way. Exactly three modules
-touch the mujoco API today:
+`core/` are mujoco-free and must stay that way. **Four** modules touch the
+mujoco API today -- it was three until the teleop demo:
 
 ```
 software/src/erp/sim/mujoco.py       f/F/h/H, the paired forms, make_Q
 software/src/erp/sim/plant.py        load_model, blind_variant, sensor_layout
 software/src/erp/sensors/mujoco.py   rows_of, make_R
+software/src/erp/viz/ghost.py        draw_ghost -- RENDERING ONLY, see below
 ```
+
+**`viz/ghost.py` is the fourth and it is a narrow, deliberate opening.** The
+rule's stated purpose is that no `Any` escapes into the estimator under strict
+mypy, because mujoco ships no `py.typed`. `draw_ghost` returns an `int` and
+writes into an `MjvScene`; nothing it produces reaches a filter, and it wraps
+every value it reads the way `erp.sim.mujoco` does. It draws the EKF's estimate
+over the plant as a translucent overlay, which is a picture, not physics. **Do
+not read this as licence to put dynamics anywhere but `erp.sim.mujoco`** -- that
+part of the rule is unchanged.
 
 **`erp.sim.mujoco` is the only module allowed to call `mj.*` for the
 dynamics**, and every function there wraps its result in
@@ -495,9 +521,15 @@ re-derive. Each has a test that would fail if it stopped being true.
 - **The effector error ellipsoid is not axis-aligned.** Over the golden
   run its major axis sits a median **24.9°** (max 45.0°) off the nearest
   world axis, so per-axis sigmas understate the worst direction by a
-  median 9.6% and up to **39.7%**. The fixture currently stores only
-  `sqrt(diag(C))`; the full 3×3 `C_ef` is computed and discarded. Keep
-  it when `propagate_to_site` lands at P8.
+  median 9.6% and up to **39.7%**. ~~The fixture currently stores only
+  `sqrt(diag(C))`; the full 3×3 `C_ef` is computed and discarded. Keep it
+  when `propagate_to_site` lands at P8.~~ Half-resolved at P8:
+  `propagate_to_site` returns the full block and `demo_three_way.py` uses
+  it, so it is no longer discarded in the package — but **the fixture
+  still stores only `sqrt(diag(C))`**, deliberately. Adding the key would
+  leave every existing array bit-identical and is therefore safe, and it
+  remains available; P8 skipped it because regenerating a Git-LFS binary
+  is a deliberate act and that phase had no need of one.
 - **Pairing the MuJoCo calls saves ~8%, not 50%.** 143.5 µs → 131.5 µs
   per predict+update. Loads halve, but `mjd_transitionFD` runs `nx+1`
   internal evaluations and is the real cost.
@@ -523,6 +555,44 @@ re-derive. Each has a test that would fail if it stopped being true.
   moves the 20 ms counts by three. `test_fusion_runner.py` asserts the
   monotonicity (more latency never loses fewer) instead, because that is
   a property of the runner rather than of the test.
+- **A live source needs `buffer_horizon > 0`, and the value has to be a
+  whole number of physics steps.** Both halves were found by building the
+  teleop demo, and each looked like success first. With `buffer_horizon
+  = 0.0`, `advance_to_safe(t)` *is* `advance_to(t)`, so the filter runs
+  ahead of a sensor that stamps the sample instant and delivers it 5 ms
+  later: **0 of 58 updates applied**, no error raised, viewer and plots
+  running. Setting it to the latency, 5 ms, fixes that and exposes the
+  second half: 5 ms is **2.5** steps of 2 ms, so the release watermark
+  `t - horizon` lands exactly on a rounding tie, and `_step_of` uses
+  `round`, which in Python breaks ties to even. Half the samples are then
+  discarded as out-of-order — **41 of 58 dropped, NIS median 6242**
+  against a target of 12, with the estimate not tracking at all.
+  Rounding the horizon up to `ceil(latency/dt)*dt` = 6 ms puts the
+  watermark on a step boundary: **0 discarded, NIS median 5.70, terminal
+  joint error 0.003 rad**. The third ingredient is calling drain/ingest
+  once per render tick rather than once per physics step — per step,
+  `advance_to_safe` runs 8 times a tick and beats its own measurement to
+  the punch.
+- **The teleop demo's degrade toggles, measured on a 3 s scripted jog**
+  (link1 to 0.906 rad, 1437 predicts, 56 updates): healthy **NIS 5.70**
+  and 0.003 rad of joint error; `swap` **16 007** and 0.944 rad, i.e. the
+  ghost fully detached; `overconfident` **589** and 0.007 rad — it tracks
+  but claims a precision it does not have, which is why NIS and not the
+  error is the diagnostic. `zeros` gives **5.70**, bit-identical to
+  healthy, confirming on a second run what P8 found: the 113-σ keyframe
+  bias does not survive the tendon equality's ~2-step recovery. Headless
+  it runs at ~18× real time, so the real-time duty is roughly 6%.
+- **The first real interactive session: 19 933 predicts, 743 updates, 0
+  discarded**, NIS median **6.29**, mean **15.75** (n = 372, second
+  half). The zero is the number that matters — it is the horizon fix
+  holding under live jogging for ~40 s rather than over a 3 s script.
+  The median/mean split is the interesting part and it is **not** in the
+  three-way demo, which reports 9.59/11.12: a keyboard jog is a *step*
+  command where the sine sweep is smooth, so each press produces a burst
+  of large innovations while a filter that cannot see the command infers
+  it from the IMUs alone. That heavy tail is the demo's thesis showing up
+  as arithmetic. Read the median for consistency and the gap between the
+  two for how hard the operator was driving it.
 - **The rest calibration, packaged (P6).** The accelerometer channels of
   the cell's formula and `calibration_from_samples` were **already
   identical** (`0.000e+00`); the gyro channels differ by exactly
@@ -563,8 +633,8 @@ re-derive. Each has a test that would fail if it stopped being true.
 | `software/src/erp/fusion/` | `runner` — `FilterRunner` (timestamps → filter steps), `History`, `Estimator` protocol. **English**, beside `core/`/`io/`, not beside `estimators/`: it decides *when* the filter steps, never what it computes. Landed at P5; the old `FusionEngine` it replaces was deleted and shares no design with it | builds on `core/` + `models/`; **never** `sensors/`, `robot/` or a wall clock |
 | `software/src/erp/calibration/` | `rest` — `calibration_from_samples` (moved here from `sensors/imu_serial.py` at P6, still re-exported there), `rest_bias` (the offline counterpart of `SerialIMUSensor.calibrate`). **English** | `core/` + numpy **only**; `sensors/` imports this, never the reverse |
 | `software/src/erp/analysis/` | `lag` (`estimate_lag`), `site` (`propagate_to_site`), `consistency` (`ConsistencyReport`, `consistency_report`). Landed at P8. **Spanish** — forced: § 5.3 required moving the first two with their Spanish docstrings intact | `core/` + `sim/`; imports mujoco (via `h`/`H`), so a test that exercises it end to end carries the `mujoco` marker |
-| `software/src/erp/viz/` | `geometry` (`sigma_per_axis`, `ellipsoid_axes`, `principal_tilt_deg` — pure numpy), `theme`, `figures` (`three_way`, `sensor_compare`, `effector_band`). Landed at P8; the old "geometry only, no backend imports" rule was overturned by ADR-0002 § 4.2. **English** | matplotlib allowed, gated behind `[viz]`. `__init__.py` re-exports **only** `geometry`, so `import erp.viz` stays numpy-only and CI (which installs `.[dev]`) can import it |
-| `software/tests/` | 311 tests. `conftest` (fake serial port + IMU layout), `test_sensor_contract` (one suite over all three `Sensor`s), `test_imu_serial`, `test_clock`, `test_replay_log`, `test_paths`, `test_plant`, `test_golden_run`, `test_robot`, `test_trajectory`, `test_core_clock`, `test_dynamics`, `test_ekf_linear`, `test_fusion_runner` (47, no mujoco — carries a verbatim copy of the old `run_imu_ekf` as a bit-identity oracle), `test_calibration` (11, 9 of them fast — same oracle trick against notebook cell 19's block), `test_config` (24, 21 of them fast — every malformed-config case paired with the good file it mutates), `test_analysis` (20 — verbatim oracles for the two moved functions, plus a broken variant per metric), `test_viz` (13 — the ellipse arithmetic runs always, the figures skip without `[viz]`) | — |
+| `software/src/erp/viz/` | `geometry` (`sigma_per_axis`, `ellipsoid_axes`, `principal_tilt_deg` — pure numpy), `theme`, `figures` (`three_way`, `sensor_compare`, `effector_band`). Landed at P8; the old "geometry only, no backend imports" rule was overturned by ADR-0002 § 4.2. **English** | matplotlib allowed, gated behind `[viz]`. `__init__.py` re-exports **only** `geometry` and nothing else -- not `strips`, `ghost` or `live` -- so `import erp.viz` stays numpy-only and CI (which installs `.[dev]`) can import it |
+| `software/tests/` | 340 tests. `conftest` (fake serial port + IMU layout), `test_sensor_contract` (one suite over all three `Sensor`s), `test_imu_serial`, `test_clock`, `test_replay_log`, `test_paths`, `test_plant`, `test_golden_run`, `test_robot`, `test_trajectory`, `test_core_clock`, `test_dynamics`, `test_ekf_linear`, `test_fusion_runner` (47, no mujoco — carries a verbatim copy of the old `run_imu_ekf` as a bit-identity oracle), `test_calibration` (11, 9 of them fast — same oracle trick against notebook cell 19's block), `test_config` (24, 21 of them fast — every malformed-config case paired with the good file it mutates), `test_analysis` (20 — verbatim oracles for the two moved functions, plus a broken variant per metric), `test_viz` (13 — the ellipse arithmetic runs always, the figures skip without `[viz]`), `test_live_sensor` (12, all fast — the live sampler's grid and latency), `test_viz_live` (12, 9 fast — the ring buffer always, the ghost geoms behind the `mujoco` marker) | — |
 | `scripts/` | `make_golden_run.py` — generates and re-checks the golden fixture. **Emptied at P8**: it now holds `run_pipeline`, `_metadata` and `main` and nothing else, i.e. configuration and a call. `demo_three_way.py` — the live three-way demo (plant truth vs noisy virtual sensor vs EKF estimate), P8's acceptance artifact. Both **Spanish** | not linted by CI |
 | `data/processed/` | `golden_ekf_run.npz` — the frozen run. Git-LFS | — |
 | `notebooks/` | `mypalletizer260EKF.ipynb` — **the driver application**; `viewer.ipynb` (MuJoCo viewer + `SimLog`); `finger_imu_toolkit.ipynb` (finger EKF rebuilt on `erp`); `finger_imu_practice.ipynb`, `Palletizer.ipynb` (reference) | may import anything |
@@ -620,8 +690,11 @@ one now. `get_project_root` is kept as an alias.
   M1's acceptance test *is* the model, so it cannot be written without
   it. Tests needing mujoco **and** the Git-LFS assets carry
   `@pytest.mark.mujoco`; everything else stays in `pytest -m "not
-  mujoco"`, which runs in ~0.9 s. Default to the fast side — 150 of 196
-  tests are there, including the whole EKF-versus-Kalman comparison.
+  mujoco"`, which runs in ~2.4 s. Default to the fast side — **258 of
+  311** tests are there, including the whole EKF-versus-Kalman
+  comparison. (This line read "~0.9 s" and "150 of 196" until
+  2026-09-22, four phases after it was last true — it is the counts in
+  the Commands block above that get re-measured, so trust those.)
 - **Inject the clock; do not read one.** Anything that waits or
   timestamps takes a `Clock` (`core/clock.py`) or a
   `Callable[[], float]`, so it can be driven by `VirtualClock` in a test.
@@ -661,10 +734,11 @@ one now. `get_project_root` is kept as an alias.
 
 `git log --oneline -5` and `git status` are the authority; this section
 goes stale on its own. **The ADR-0002 work is now committed** — as of
-2026-09-22 the tip is P7 (`erp.io.config`), on top of `60e2d07` (the
-golden-log restore) and `677540e` (`added calibration package`). Neither
-`587162f` nor `677540e` follows the conventional-commit rule this file
-states; follow the convention anyway.
+2026-09-22 the tip is `129834c`, P8 (`erp.analysis` + `erp.viz` + the
+three-way demo), on top of `d1c7c38`, `0b53942` (P7, `erp.io.config`),
+`60e2d07` (the golden-log restore) and `677540e` (`added calibration
+package`). Neither `587162f` nor `677540e` follows the
+conventional-commit rule this file states; follow the convention anyway.
 
 The 2026-09-21 hardware run (`data/raw/imu_trajectory_raw.csv`,
 `data/raw/palletizer_traj.npz`, `notebooks/mypalletizer260EKF.ipynb`)
@@ -680,12 +754,21 @@ over recorded MuJoCo output, `ClockSync`), `MeasurementLog`, the MuJoCo
 `erp.robot`, `erp.trajectory`, `erp.core.clock`, the
 `DiscreteDynamics` seam, the blind EKF, `erp.fusion.FilterRunner`,
 `erp.calibration`, `erp.io.config`, `erp.analysis`, `erp.viz`, the
-three-way demo (`scripts/demo_three_way.py`), and the palletizer notebook
-end to end (trajectory → real arm + MuJoCo replay → IMU log → EKF →
-end-effector covariance). 311 tests collected; **310 pass, 1 skipped**,
-`ruff` and `mypy --strict` (44 files) are clean, `pytest -m "not
-mujoco"` is green (258 passed, 1 skipped, 52 deselected), and
+three-way demo (`scripts/demo_three_way.py`), the **interactive teleop
+demo** (`scripts/demo_teleop.py` — keyboard jogging, the estimate drawn
+as a ghost over the plant, live pyqtgraph strips), and the palletizer
+notebook end to end (trajectory → real arm + MuJoCo replay → IMU log →
+EKF → end-effector covariance). 340 tests collected; **339 pass, 1
+skipped**, `ruff` and `mypy --strict` (48 files) are clean, `pytest -m
+"not mujoco"` is green (284 passed, 1 skipped, 55 deselected), and
 `make_golden_run.py --check` reproduces the fixture at `rtol=1e-12`.
+
+**The teleop demo is not an ADR-0002 phase.** It was built on 2026-09-22
+outside the roadmap, on top of P8, and it neither closes nor advances a
+milestone — M1's open numeric question is unchanged by it. What it adds
+to the package is `erp.sensors.LiveSimSensor` (a `Sensor` over a
+*running* plant, which `SimSensor` structurally cannot be),
+`erp.viz.strips.RingBuffer`, `erp.viz.ghost` and `erp.viz.live`.
 
 **ADR-0002 phases P0 through P8 are done — every phase except P7.5.** Read
 `docs/adr/0002-notebook-to-package.md` before starting any of the rest:
@@ -705,12 +788,33 @@ Two things to preserve from the finished phases:
   true as of 2026-09-21 — re-verified by running `run_pipeline` against
   the committed log on the current sources.
 
-**M1 is still not achieved, and P5 did not close it** — these are
-different claims and it is easy to bank the wrong one. M1 needs *the
-package*, not a script, to reproduce the golden run, plus a
-`ConsistencyReport`. P5 took `run_imu_ekf` into `erp.fusion`, so what is
-left in `scripts/make_golden_run.py` is `estimate_lag` and
-`site_position_cov` — both P8's. **M1 now closes at P8 alone.**
+**M1 is structurally closed and numerically is not — do not collapse
+those into "M1 done".** ~~M1 is still not achieved, and P5 did not close
+it; M1 now closes at P8 alone.~~ P8 landed in `129834c` and that much is
+settled: `scripts/make_golden_run.py` holds `run_pipeline`, `_metadata`
+and `main` and nothing else, every piece of the estimation path is in the
+package, and `ConsistencyReport` exists with falsifications that fail it
+(a declared `R` 100× too small gives NIS 65 530 against 9.59; a one-sided
+wiring swap gives 74 725). ADR-0002 § 6 marks every phase but P7.5
+**done**.
+
+**What is not met is the band.** § 5.1's milestone table asks for NIS
+11–13 against a target of 12 and effector NEES 1.8–2.2 against 3.
+Measured by `scripts/demo_three_way.py` on simulated data: **NIS median
+9.59** (mean 11.12, n = 31 over the second half) and **effector NEES
+median 1.79**, 2σ coverage 1.00 / 1.00 / 0.97. Both sit just below their
+bands. The NIS figure agrees exactly with the notebook's own dry run
+(9.6), so the run reproduces; what does not agree is the band, which
+ADR-0002 § 2 attributes to a `sig_act` sweep — a different experiment.
+Either the band was recorded from that sweep and never described this
+configuration, or the two differ in a way nobody wrote down.
+
+**Resolve that before declaring M1, and do not move the band to fit the
+number.** A filter slightly *under* its NIS target is claiming more noise
+than it has, which is the safe direction and is why this is a decision
+rather than a bug — but deciding it by editing the table is how the
+project loses the one number that would have caught a real
+overconfidence. The full record is ADR-0002's P8 entry.
 
 Not built: `runtime/`, `ros2_ws/`, and any UKF.
 Online fusion exists
@@ -794,9 +898,6 @@ Assume these are historical unless you have checked against the source:
   reshaped `Measurement` survive**; the rest were deleted in `1987f00`.
   The "Concrete implementations" table is almost entirely fictional. § 6
   describes the `FusionEngine` that no longer exists.
-- **`AGENTS.md`** repeats the "four ABCs are frozen" rule and points at
-  `models/base.py` and `estimators/base.py`, which are gone. Its install
-  and check commands are still correct (modulo the `[app]` caveat above).
 - **`docs/adr/0001-multi-rate-fusion.md`** is the authoritative record of
   the *finger* design. Its reasoning on schedule-invariant `Q` (§ 2.1),
   actuator lag as state (§ 2.3) and late measurements (§ D6) is still
@@ -810,26 +911,29 @@ Assume these are historical unless you have checked against the source:
   Read § 6 before tuning anything. They describe the finger, not the arm.
 - `docs/adr/0002-notebook-to-package.md` is the **current** plan, and
   now also the record of what has been built against it —
-  P0 → P5 are marked done with per-phase notes. It is the first thing to
+  P0 → P8 are marked done with per-phase notes. It is the first thing to
   read before touching the estimation path. Its remaining content: the
   pipeline as it exists, what blocks packaging it, the target module
   layout and a phased roadmap. It frames the work as three capability
-  milestones — **M1** simulated estimation (achieved *in the notebook*;
-  not yet in the package), **M2** real-time simulated operation with
-  decoupled command and sensor clocks, **M3** the same code on physical
-  hardware (the objective). Each phase is tagged with the milestone it
-  serves.
+  milestones — **M1** simulated estimation (in the package since P8,
+  structurally; see the numeric caveat under "Current repo state"),
+  **M2** real-time simulated operation with decoupled command and sensor
+  clocks, **M3** the same code on physical hardware (the objective).
+  Each phase is tagged with the milestone it serves.
 
-  **One phase remains: P7.5.**
-  (`erp.runtime.session`: `Mode`, `Session`, `build_session`, the two CI
-  greps of § 4.8, M2 fault injection — plus `build_sensor()`, moved out
-  of P7 because only that module may name a driver class, and
-  `MeasurementLog` carrying `R`, deferred twice because it changes the
-  CSV format the golden run reads) is the last phase before hardware.
-  **P8 is what closes M1** — the `ConsistencyReport` plus
-  `propagate_to_site`, which empties `scripts/make_golden_run.py`. P8
-  depends only on P5, so it is startable now; § 5.1 puts it outside the
-  phase groups on purpose.
+  **Read § 5.1's graph and § 6's table, not the header.** The header has
+  gone stale three times while those two stayed correct — on 2026-09-22
+  it still read "P7 onward are not started", two commits after P8
+  shipped. It now carries a correction saying so.
+
+  **One phase remains: P7.5** (`erp.runtime.session`: `Mode`, `Session`,
+  `build_session`, the two CI greps of § 4.8, M2 fault injection — plus
+  `build_sensor()`, moved out of P7 because only that module may name a
+  driver class, and `MeasurementLog` carrying `R`, deferred twice
+  because it changes the CSV format the golden run reads). It is the
+  last phase before hardware, and it serves M2/M3 — **nothing in it is
+  M1's.** ~~P8 is what closes M1, and is startable now.~~ P8 landed in
+  `129834c`.
 
   Unlike the documents above it, this one is **not** historical, and it
   is kept current as phases land rather than rewritten — a finished phase

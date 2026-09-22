@@ -6,7 +6,13 @@ sensor is started, and the MuJoCo helpers in :mod:`erp.sensors.mujoco`
 from that module explicitly.
 """
 
-from erp.sensors.base import Sensor, SensorError, identity_calibration, shared_rows_R
+from erp.sensors.base import (
+    Sensor,
+    SensorError,
+    identity_calibration,
+    shared_rows_R,
+    sqrt_psd,
+)
 from erp.sensors.clock import ArrivalClock, ClockSync, HostClock
 from erp.sensors.imu_serial import (
     IMUDecoder,
@@ -14,6 +20,7 @@ from erp.sensors.imu_serial import (
     SerialIMUSensor,
     calibration_from_samples,
 )
+from erp.sensors.live import LiveSimSensor
 from erp.sensors.replay import ReplaySensor
 from erp.sensors.sim import SimSensor
 from erp.sensors.stream import StreamSensor
@@ -24,6 +31,7 @@ __all__ = [
     "HostClock",
     "IMUDecoder",
     "LineTransport",
+    "LiveSimSensor",
     "ReplaySensor",
     "Sensor",
     "SensorError",
@@ -33,4 +41,5 @@ __all__ = [
     "calibration_from_samples",
     "identity_calibration",
     "shared_rows_R",
+    "sqrt_psd",
 ]

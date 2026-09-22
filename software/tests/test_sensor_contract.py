@@ -13,7 +13,14 @@ import pytest
 from conftest import ROWS, FakePort, kv_line, wait_until
 
 from erp.core.types import Measurement
-from erp.sensors import IMUDecoder, ReplaySensor, Sensor, SerialIMUSensor, SimSensor
+from erp.sensors import (
+    IMUDecoder,
+    LiveSimSensor,
+    ReplaySensor,
+    Sensor,
+    SerialIMUSensor,
+    SimSensor,
+)
 
 N = 30
 
@@ -28,6 +35,16 @@ def _sim(decoder: IMUDecoder, R: np.ndarray) -> Iterator[Sensor]:
     yield SimSensor(t, np.zeros((t.size, 15)), rows=ROWS, R=R, rate_hz=10.0)
 
 
+def _live(decoder: IMUDecoder, R: np.ndarray) -> Iterator[Sensor]:
+    # Polled up front so the sensor arrives at the suite already holding
+    # samples: every other factory yields a populated sensor, and the
+    # contract is about what drain/read hand over, not about ingestion.
+    sensor = LiveSimSensor(rows=ROWS, R=R, rate_hz=20.0)
+    for i in range(N):
+        sensor.poll(i * 0.05, np.zeros(15))
+    yield sensor
+
+
 def _serial(decoder: IMUDecoder, R: np.ndarray) -> Iterator[Sensor]:
     lines = [kv_line(np.full(12, i)) for i in range(N)]
     sensor = SerialIMUSensor(None, decoder, ROWS, R, transport=FakePort(lines))
@@ -37,6 +54,7 @@ def _serial(decoder: IMUDecoder, R: np.ndarray) -> Iterator[Sensor]:
 
 
 FACTORIES: dict[str, Callable[[IMUDecoder, np.ndarray], Iterator[Sensor]]] = {
+    "live": _live,
     "replay": _replay,
     "sim": _sim,
     "serial": _serial,

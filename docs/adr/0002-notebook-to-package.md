@@ -1,23 +1,36 @@
 # ADR-0002 — From notebook to package: Phase 2 architecture
 
 - **Status:** accepted, in progress
-- **Date:** 2026-09-19 (progress updated 2026-09-20)
+- **Date:** 2026-09-19 (progress updated 2026-09-22)
 - **Supersedes:** ADR-0001 § D1 (the four ABCs) and § D5 (MuJoCo behind a sensor)
 - **Subject:** `notebooks/mypalletizer260EKF.ipynb` → `software/src/erp/`
 
-**Progress: P0, P0.5, P1, P2, P3, P3.5, P4, P5 and P6 are done. P7 onward are
-not started.**
+~~**Progress: P0, P0.5, P1, P2, P3, P3.5, P4, P5 and P6 are done. P7 onward are
+not started.**~~ **Corrected 2026-09-22: every phase except P7.5 is done.** P7
+landed in `0b53942` and P8 in `129834c`. **This header is the third time this
+document has gone stale while § 5.1 and § 6 stayed right, so read those
+first — they are the authority, and a reader who believed this paragraph on
+2026-09-22 would have been told P7 had not started two commits after it
+shipped.**
 
-**Every phase in group G1 is now complete, and M1 is still not achieved.** The
-two are not the same claim and it would be easy to bank the wrong one. M1's
-acceptance criterion is that *the package*, not the notebook, reproduces the
-golden run, plus a `ConsistencyReport` landing at NIS 11–13 on simulated data.
-Today the golden run is still driven by `scripts/make_golden_run.py`, which
-~~holds `run_imu_ekf` (P5's) and~~ holds `estimate_lag` and `site_position_cov`
-(both P8's), and `ConsistencyReport` does not exist. What G1 bought is that
-every *piece* it uses now lives in the package. ~~**M1 closes at P5 and P8, not
-here.**~~ **P5 has since landed and did not close M1: it took `run_imu_ekf` out
-of the script, which is necessary and not sufficient. M1 closes at P8 alone.**
+~~**Every phase in group G1 is now complete, and M1 is still not achieved.**~~
+**Corrected at P8.** The claim below was true when written and its *distinction*
+still is — "the phases are done" and "the milestone is achieved" are different
+statements — but the facts under it have all moved: `scripts/make_golden_run.py`
+no longer holds `estimate_lag` or `site_position_cov`, and `ConsistencyReport`
+exists. M1's acceptance criterion is that *the package*, not the notebook,
+reproduces the golden run, plus a `ConsistencyReport` landing at NIS 11–13 on
+simulated data. ~~Today the golden run is still driven by
+`scripts/make_golden_run.py`, which~~ ~~holds `run_imu_ekf` (P5's) and~~ ~~holds
+`estimate_lag` and `site_position_cov` (both P8's), and `ConsistencyReport` does
+not exist.~~ What G1 bought is that every *piece* it uses now lives in the
+package. ~~**M1 closes at P5 and P8, not here.**~~ ~~**P5 has since landed and
+did not close M1: it took `run_imu_ekf` out of the script, which is necessary
+and not sufficient. M1 closes at P8 alone.**~~ **P8 has since landed and closed
+M1 structurally but not numerically — NIS median 9.59 against the 11–13 band and
+effector NEES 1.79 against 1.8–2.2. That is an open decision, recorded in full
+in P8's entry in § 5.2, and it is the one thing still standing between this
+document and "M1 achieved".**
 The per-phase records are in § 5.2 and the obligation status is the rightmost
 column of § 6. In short: the tree is green, M1's acceptance test exists as a
 frozen fixture, `erp.sim.plant` + a fixed `erp.io.paths` have absorbed the
@@ -26,18 +39,27 @@ that gates every send, `erp.trajectory` owns the setpoint profile, and since
 P5 `erp.fusion.FilterRunner` owns every conversion of a timestamp into filter
 steps — none of it moving a digit of the golden run.
 
-> **Counts updated at P5** (the numbers below stood at P3 and were left stale
-> through P3.5 and P4). The suite is **242 collected, 230 passed, 1 skipped**,
-> and the 12 failures are `test_golden_run.py` against an uncommitted
-> **re-recording** of `data/raw/imu_trajectory_raw.csv`, not against any code:
-> run the same pipeline over the *committed* log and it reproduces the fixture
-> at `rtol=1e-12`, every key. `pytest -m "not mujoco"` is 197 passed, 1
-> skipped, 45 deselected in ~3.4 s.
+> ~~**Counts updated at P5**~~ **Counts updated at P8** (they stood at P3
+> through P3.5 and P4, were corrected at P5, and went stale again through P6,
+> P7 and P8 — this block has now been wrong more often than right, so re-measure
+> rather than quoting it). The suite is **311 collected, 310 passed, 1 skipped**
+> in ~3.4 s, and `pytest -m "not mujoco"` is **258 passed, 1 skipped, 52
+> deselected** in ~2.4 s. Measured 2026-09-22 on the `EKF` env, clean tree,
+> `ruff` and `mypy --strict` (44 files) clean and `make_golden_run.py --check`
+> green at `rtol=1e-12`.
+>
+> ~~The suite is **242 collected, 230 passed, 1 skipped**, and the 12 failures
+> are `test_golden_run.py` against an uncommitted **re-recording** of
+> `data/raw/imu_trajectory_raw.csv`, not against any code.~~ Resolved in
+> `60e2d07`, which restored the committed log; the 12 failures are gone and the
+> episode is written up at the top of `CLAUDE.md` as the diagnosis to repeat.
 >
 > Two more statements in this header went stale the same way and are corrected
 > rather than deleted: "M1's remaining phase is P4" and "the M2 phases that
 > decide whether the filter can run in the loop (P3.5, P5) have not started".
-> **P3.5, P4 and P5 are all done**, and what remains of M1 is P8.
+> **P3.5, P4 and P5 are all done**, ~~and what remains of M1 is P8~~ **and P8 is
+> done too; what remains of M1 is the numeric decision above, and the only
+> unbuilt phase is P7.5.**
 
 **P3 was reshaped before it was built, and § 5.2 records the disagreement
 rather than quietly rewriting the plan.** The short version: its original
@@ -50,8 +72,11 @@ elsewhere.
 ~~M1's remaining phase is P4. The M2 phases that decide whether the filter can
 run in the loop (P3.5, P5) have not started.~~ Superseded at P5: P3.5, P4 and
 P5 are done, the filter now runs inside `run_trajectory`'s drain hook, and
-M1's remaining phase is **P8** — the `ConsistencyReport` and moving the golden
-run's last two helpers out of `scripts/`.
+~~M1's remaining phase is **P8** — the `ConsistencyReport` and moving the golden
+run's last two helpers out of `scripts/`.~~ Superseded again at P8: both helpers
+moved, `ConsistencyReport` exists, and **M1 has no remaining phase** — only the
+numeric decision in the header. **P7.5 is the one unbuilt phase in the
+document**, and it serves M2/M3, not M1.
 
 Nothing in § 2 or § 3 has been rewritten to match. Those sections record the
 pipeline and its blockers **as found**, and the measured numbers in them are
@@ -1936,8 +1961,9 @@ already knows it can be wrong.
 Running the suite:
 
 ```bash
-pytest -q                    # 242 collected; see the header note on the 12 golden failures
-pytest -q -m "not mujoco"    # 197 passed, 1 skipped, 45 deselected, ~3.4 s
+pytest -q                    # 310 passed, 1 skipped, ~3.4 s   (was: 242 collected, 12 golden
+                             #   failures -- resolved in 60e2d07, which restored the log)
+pytest -q -m "not mujoco"    # 258 passed, 1 skipped, 52 deselected, ~2.4 s
 ```
 
 The `mujoco` marker means "needs mujoco **and** the Git-LFS model assets",

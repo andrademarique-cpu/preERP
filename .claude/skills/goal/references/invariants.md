@@ -72,7 +72,7 @@ calibration and the config loader have all moved under it without shifting one
 digit. That is the only reason any of it can be believed.
 
 ```bash
-conda run -n erp python scripts/make_golden_run.py --check
+conda run -n EKF python scripts/make_golden_run.py --check
 git status --short data/processed/ data/raw/     # both must be empty
 ```
 

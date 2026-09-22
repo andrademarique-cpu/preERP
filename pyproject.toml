@@ -47,6 +47,17 @@ dev = [
 viz = [
     "matplotlib",
 ]
+# The interactive demo (scripts/demo_teleop.py) only. Separate from [viz] because
+# it is a different backend for a different job, not more of the same: matplotlib
+# redraws a whole figure and cannot hold a 30 Hz strip, which makes the viewer
+# stutter in a way that reads as a physics problem. pyqtgraph was a dependency
+# here once, for a finger viewer that no longer exists (see the [app] note below).
+# Nothing in erp/ imports it at package scope -- erp/viz/__init__.py withholds
+# erp.viz.live -- so a tree without it imports and tests clean.
+live = [
+    "pyqtgraph",
+    "PyQt5",
+]
 # Device access, needed only to talk to real hardware. pyserial is imported
 # lazily inside SerialIMUSensor._open, and pymycobot only by the arm driver in
 # notebooks/mypalletizer260EKF.ipynb, so the package and its tests import
@@ -124,6 +135,18 @@ ignore_missing_imports = true
 # worth checking -- is pure numpy and typed either way.
 [[tool.mypy.overrides]]
 module = ["matplotlib", "matplotlib.*"]
+ignore_missing_imports = true
+
+# pyqtgraph ships no py.typed, so it is Any everywhere -- locally and in CI
+# alike, which is what makes erp.viz.live type-check the same in both. PyQt5 is
+# the opposite and the reason this override has two modules: it ships .pyi stubs
+# but lives in [live], which CI does not install, so mypy would read real Qt
+# signatures here and find nothing there. erp.viz.live therefore subclasses no Qt
+# class and holds its widgets as Any attributes -- the same resolution as _RC in
+# erp/viz/theme.py, and for the same reason: an annotation that is correct on
+# both legs beats a type: ignore that is unused on one of them.
+[[tool.mypy.overrides]]
+module = ["pyqtgraph", "pyqtgraph.*", "PyQt5", "PyQt5.*"]
 ignore_missing_imports = true
 
 [tool.ruff]

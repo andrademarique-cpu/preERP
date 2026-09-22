@@ -14,7 +14,7 @@ import numpy as np
 import numpy.typing as npt
 
 from erp.core.types import Array
-from erp.sensors.base import shared_rows_R
+from erp.sensors.base import shared_rows_R, sqrt_psd
 from erp.sensors.replay import ReplaySensor
 
 __all__ = ["SimSensor"]
@@ -106,13 +106,10 @@ class SimSensor(ReplaySensor):
 
 
 def _sqrt_psd(R: Array) -> Array:
-    """A matrix L with L L^T = R; Cholesky when possible, eigen otherwise.
+    """Deprecated alias for :func:`erp.sensors.base.sqrt_psd`.
 
-    The eigen path covers a PSD ``R`` with zero-variance channels, which
-    Cholesky rejects.
+    The implementation moved to ``base`` so the live sensor could colour its
+    noise the same way; it is byte-for-byte the same arithmetic, so every
+    ``SimSensor`` draw is unchanged.
     """
-    try:
-        return np.asarray(np.linalg.cholesky(R), dtype=np.float64)
-    except np.linalg.LinAlgError:
-        w, V = np.linalg.eigh(0.5 * (R + R.T))
-        return np.asarray(V * np.sqrt(np.clip(w, 0.0, None)), dtype=np.float64)
+    return sqrt_psd(R)

@@ -17,7 +17,24 @@ import numpy.typing as npt
 
 from erp.core.types import Array, CalibrationResult, IntArray, Measurement
 
-__all__ = ["Sensor", "SensorError", "identity_calibration", "shared_rows_R"]
+__all__ = ["Sensor", "SensorError", "identity_calibration", "shared_rows_R", "sqrt_psd"]
+
+
+def sqrt_psd(R: npt.ArrayLike) -> Array:
+    """A matrix ``L`` with ``L @ L.T == R``; Cholesky when possible, eigen otherwise.
+
+    Used to colour white noise into N(0, R) for the simulated sensors. The
+    eigen path covers a PSD ``R`` with zero-variance channels, which Cholesky
+    rejects -- an ``R`` built from a config where one sigma is 0 is a
+    configuration choice, not an error, and it should produce a noiseless
+    channel rather than a ``LinAlgError`` at construction time.
+    """
+    R_a = np.asarray(R, dtype=np.float64)
+    try:
+        return np.asarray(np.linalg.cholesky(R_a), dtype=np.float64)
+    except np.linalg.LinAlgError:
+        w, V = np.linalg.eigh(0.5 * (R_a + R_a.T))
+        return np.asarray(V * np.sqrt(np.clip(w, 0.0, None)), dtype=np.float64)
 
 
 def shared_rows_R(rows: npt.ArrayLike, R: npt.ArrayLike) -> tuple[IntArray, Array]:
