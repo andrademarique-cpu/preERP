@@ -19,13 +19,23 @@ IMU_KEYS = [
     "IMU_1.wx", "IMU_1.wy", "IMU_1.wz",
 ]
 
-# Physical wiring: IMU_1 sits on link1, IMU_0 on link2. Order matches the XML's
+# Physical wiring: IMU_0 sits on link1, IMU_1 on link2. Order matches the XML's
 # <sensor> block, so rows_of(model, *LAYOUT) == arange(12).
+#
+# This said the opposite until ADR-0002 P7. It was one of the four copies of the
+# wiring in 3.3, and one of the two that disagreed with config/estimation.yaml
+# -- which carries the fitted residuals (gyro rms 0.06-0.10 rad/s against 0.34
+# for the swapped assignment) and is what the golden fixture was generated from.
+# The tests here read the assignment out of LAYOUT rather than hardcoding
+# channel values, so correcting it changes no expectation; it removes a fixture
+# that quietly taught the wrong wiring to anyone reading the suite for an
+# example. The swapped form is still exercised on purpose, as the falsification
+# in test_golden_run.SWAPPED_LAYOUT.
 LAYOUT = {
-    "link1_acc": ("IMU_1.ax", "IMU_1.ay", "IMU_1.az"),
-    "link2_acc": ("IMU_0.ax", "IMU_0.ay", "IMU_0.az"),
-    "link1_gyro": ("IMU_1.wx", "IMU_1.wy", "IMU_1.wz"),
-    "link2_gyro": ("IMU_0.wx", "IMU_0.wy", "IMU_0.wz"),
+    "link1_acc": ("IMU_0.ax", "IMU_0.ay", "IMU_0.az"),
+    "link2_acc": ("IMU_1.ax", "IMU_1.ay", "IMU_1.az"),
+    "link1_gyro": ("IMU_0.wx", "IMU_0.wy", "IMU_0.wz"),
+    "link2_gyro": ("IMU_1.wx", "IMU_1.wy", "IMU_1.wz"),
 }
 ROWS = np.arange(12)
 

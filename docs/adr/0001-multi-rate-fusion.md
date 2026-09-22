@@ -359,3 +359,135 @@ Two further findings from implementation:
 - Whether contact force sensing needs its own process-model branch
   (`ContactDynamicsModel`) at contact transitions, where the report notes
   proprioception is weakest. Out of scope here; likely ADR-0002.
+
+---
+
+## Appendix A — the finger sections of `config/estimation.yaml`
+
+**Added 2026-09-22 at ADR-0002 P7, and historical on arrival.** P7 made
+`config/estimation.yaml` the single wiring definition for the *arm* and stripped
+the sections below, which described the 2-link finger whose code was deleted in
+`1987f00`. They are reproduced verbatim rather than deleted because ADR-0002
+§ 5.3 is explicit that measured constants move with the code they annotate or
+come into an ADR — the comments here are the only surviving record of why these
+numbers were what they were, and the `psd_act` note in particular is a result,
+not a setting.
+
+None of this corresponds to any code in the tree today. Do not copy a value out
+of here into the arm's config: `psd_alpha` and `psd_act` are continuous-time
+PSDs in rad²/s³ and rad²/s, while the arm's `make_Q` takes per-step DWNA sigmas
+at a fixed 2 ms tick. Converting between the two is a re-derivation, not a unit
+change.
+
+```yaml
+# Servoed joints, proximal to distal. Mirrors notebooks/assets/finger_2link.xml,
+# whose physical values live in the notebook's `actuators` dict.
+joints:
+  - name: joint_1
+    kp: 2.0            # N*m/rad, servo proportional gain
+    kv: 0.025          # N*m*s/rad, servo velocity gain
+    damping: 0.003     # N*m*s/rad, structural (0.002) + gearbox (1e-3), summed
+    inertia: 4.0e-5    # kg*m^2, reflected rotor inertia dominates the link here
+    tau: 0.004         # s, servo activation time constant
+    psd_alpha: 1.0e-2  # rad^2/s^3, angular-acceleration disturbance PSD
+    psd_act: 1.0e-8    # rad^2/s, servo activation jitter PSD
+  - name: joint_2
+    kp: 0.8
+    kv: 0.010
+    damping: 0.0028    # structural (0.002) + gearbox (8e-4)
+    inertia: 2.0e-5
+    tau: 0.004
+    psd_alpha: 1.0e-2
+    psd_act: 1.0e-8
+
+# psd_alpha is a continuous-time power spectral density in rad^2/s^3. It is NOT
+# the notebook's SIG_ALPHA = 12.0 rad/s^2, which is a per-step DWNA sigma valid
+# only at a fixed 2 ms tick. Converting between them is a re-derivation, not a
+# unit change; the values above are placeholders pending that work.
+# See ADR-0001 sections 2.1 and 3 (D3).
+
+sensors:
+  imu_proximal:
+    model: joint_accel_model    # erp.models.measurement
+    rate_hz: 1000
+    latency_s: 0.001            # sample instant to host arrival
+    sigma: 0.05                 # m/s^2, per channel
+    frame_id: i1
+  imu_distal:
+    model: joint_accel_model
+    rate_hz: 1000
+    latency_s: 0.001
+    sigma: 0.05
+    frame_id: i2
+  gyro_proximal:
+    model: joint_block_model
+    block: rate
+    rate_hz: 1000
+    latency_s: 0.001
+    sigma: 0.005                # rad/s, per channel
+    frame_id: i1
+  encoders:
+    model: joint_block_model
+    block: angle
+    rate_hz: 100
+    latency_s: 0.005
+    sigma: 0.0017               # rad, per channel (~0.1 deg)
+    frame_id: joint
+
+estimators:
+  finger_ekf:
+    type: ExtendedKalmanFilter   # erp.estimators.ekf
+    process_model: servoed_finger_model
+    known_input: true            # the commanded servo angle reaches the filter
+    # State is [q, v, a] in blocks: angle (rad), rate (rad/s), servo
+    # activation (rad). The activation block is not optional -- dropping it
+    # biases every accelerometer channel in a way no Q or R tuning repairs.
+    # See ADR-0001 section 2.3.
+    initial_covariance:
+      angle: 1.0e-4       # rad^2
+      rate: 1.0e-2        # (rad/s)^2
+      activation: 1.0e-4  # rad^2
+
+  # Deployment configuration: on real hardware the setpoint lives inside the
+  # servo's own controller and never reaches the estimator. The activation stops
+  # being driven by u and becomes a random walk the filter estimates from the
+  # observed motion, which is possible because it is observable from the encoder
+  # and gyro alone (observability rank 3n).
+  finger_ekf_blind:
+    type: ExtendedKalmanFilter
+    process_model: servoed_finger_model
+    known_input: false
+    # psd_act MEANS SOMETHING DIFFERENT HERE. Under known_input it is jitter
+    # around a setpoint the filter already knows (1.0e-8 above). Here it must
+    # cover the entire unknown actuation, and is ~5 orders larger. Inheriting
+    # the jitter value is the specific mistake the falsification test guards:
+    # at 1.0e-6 the filter is 959x overconfident.
+    #
+    # Tuned against NEES, not derived -- same caveat as psd_alpha. Measured on
+    # the test harness: 8.0e-4 holds 0.918-1.039 of the chi-squared target over
+    # five disjoint 20-run blocks. Re-tune if the command bandwidth changes;
+    # the value scales roughly with the square of the command's rate of change.
+    psd_act: 8.0e-4       # rad^2/s, random-walk PSD on the activation
+    # tau is unused in this mode: there is no lag to integrate, only a walk.
+    initial_covariance:
+      angle: 1.0e-4       # rad^2
+      rate: 1.0e-2        # (rad/s)^2
+      activation: 1.0e-4  # rad^2
+```
+
+Two of those numbers are worth carrying forward as *reasoning* even though the
+values do not transfer, and both are already restated in the arm's documents:
+
+- **The activation must be a state.** Dropping it biases every accelerometer
+  channel in a way no `Q` or `R` tuning repairs (§ 2.3). The arm's blind model
+  reaches the same conclusion by a different route — `blind_variant` sets
+  `dyntype` to `mjDYN_INTEGRATOR` so the three position servos *become*
+  activation states, `na` 0 → 3.
+- **A blind filter's activation PSD is not the known-input one.** Inheriting the
+  jitter value left the finger filter 959× overconfident. The arm's equivalent
+  knob is `SIG_ACT_BLIND = 5e-3` rad per step in `scripts/make_golden_run.py`,
+  and it was tuned separately for the same reason.
+
+Also stripped at P7, and *not* a finger leftover: `inputs.rate_hz` was `200`
+here. No arm run has ever used it — the notebook streams at 25 Hz — so P7 set it
+to 25 rather than carry a number the loader would now hand to callers.

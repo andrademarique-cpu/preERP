@@ -357,17 +357,34 @@ arrays before the filter ever sees them.
 > to carry `R` is P7's, with the config loader, and the notebook says so at the point where
 > it rebuilds them.
 
-### 3.3 Three copies of the IMU wiring, two of which disagree
+### 3.3 ~~Three~~ **Four** copies of the IMU wiring, two of which disagree
 
 | Source | link1 | link2 |
 |---|---|---|
-| notebook `IMU_LAYOUT` | IMU_0 | IMU_1 |
+| notebook `IMU_LAYOUT` (now `scripts/make_golden_run.py`) | IMU_0 | IMU_1 |
 | `config/estimation.yaml` | IMU_0 | IMU_1 |
 | `software/tests/conftest.py` | **IMU_1** | **IMU_0** |
+| `IMUDecoder`'s docstring — *missed when this table was written* | **IMU_1** | **IMU_0** |
 
 The config carries the fitted residuals (gyro rms 0.06–0.10 rad/s against 0.34
 for the swapped assignment), so the config is right. No loader reads the YAML,
 so it is documentation that cannot drift-check itself.
+
+> **Resolved in P7.** The split was 2–2, not 3–1: this table missed the fourth
+> copy, in `IMUDecoder`'s own docstring, which is exactly the kind of copy a
+> table of copies is bad at counting. `config/estimation.yaml` is now loaded by
+> `erp.io.config` and is the definition; `conftest.py` and the docstring were
+> corrected to match it, and `scripts/make_golden_run.py` keeps its own dict
+> only because the fixture was generated from it — `test_config.py` asserts the
+> two agree, so editing the YAML alone now fails rather than drifts.
+>
+> The two disagreeing copies were **wrong in a way nothing could catch**: the
+> tests read the assignment back out of `conftest.LAYOUT`, so they passed under
+> either wiring and quietly served the rejected one as the worked example. The
+> corrected tests derive the block order from `LAYOUT` and assert the decoder's
+> contract instead, which holds whichever way the arm is wired. The swapped form
+> survives in exactly one place, `test_golden_run.SWAPPED_LAYOUT`, as the
+> falsification.
 
 ### 3.4 `run_imu_ekf` is an ad-hoc scheduler
 
@@ -1094,8 +1111,8 @@ flowchart LR
 
     subgraph G3["Reach M3 - same code, real devices"]
         P6["P6<br/>calibration<br/>rest_bias<br/>DONE"]
-        P7["P7<br/>config loader"]
-        P75["P7.5<br/>runtime.session<br/>+ CI guards"]
+        P7["P7<br/>config loader<br/>DONE"]
+        P75["P7.5<br/>runtime.session<br/>+ CI guards<br/>+ build_sensor"]
         P6 --> P7
         P7 --> P75
     end
@@ -1111,7 +1128,7 @@ flowchart LR
     P8 --> OBJ
 
     classDef done fill:#d6f5d6,stroke:#2e7d32,stroke-width:2px,color:#1b5e20
-    class P0,P05,P1,P2,P3,P35,P4,P5,P6 done
+    class P0,P05,P1,P2,P3,P35,P4,P5,P6,P7 done
 ```
 
 P8 sits outside the groups on purpose: the consistency report and the lag
@@ -1700,14 +1717,85 @@ direction so the finding is recorded rather than remembered.
 decoder's `R` and subtracts the bias rather than re-decoding. Teaching the log
 to carry `R` is P7's, and the notebook says so at the line where it matters.
 
-**P7 — `erp.io.config`.** *(M3)* YAML into dataclasses, with `build_decoder()` and
-`build_sensor()`. Make `config/estimation.yaml` the only wiring definition; fix
+**P7 — `erp.io.config`. DONE, reshaped.** *(M3)* YAML into dataclasses, with `build_decoder()` and
+~~`build_sensor()`~~. Make `config/estimation.yaml` the only wiring definition; fix
 the `conftest.py` disagreement (3.3); strip the dead finger sections. *Test:
 the config's layout round-trips through `IMUDecoder`, and `rows_of` returns
 contiguous rows.*
 
+*Reshaped before it was built:* `build_sensor()` was moved out of this phase and
+into P7.5. It cannot live in `erp/io/config.py`, because § 4.8's second
+mechanism reserves naming `SerialIMUSensor`, `SimSensor`, `DryRunArm` and
+`MyPalletizerArm` to `erp/runtime/session.py`, and adds a CI grep at P7.5 that
+would fail on this module the day it lands. Adding `erp/io/config` to that
+grep's exemption list was the alternative and was rejected: it would widen the
+"one construction point" guarantee before the point exists. `IMUDecoder` is not
+a driver — it opens no port and starts no thread — so `build_decoder()` stays.
+
+*What landed:* `erp/io/config.py` — `TimeConfig`, `InputsConfig`, `ImuConfig`,
+`EstimationConfig` (all frozen; `layout` and `axis_maps` are read-only, the
+arrays flagged non-writeable), `load_config`, `default_config_path`,
+`build_decoder`, and a `ConfigError` that always names the full key path.
+`pyyaml` joined `dependencies` rather than an extra, on the same test `[app]`
+fails: it is not device access. `software/tests/test_config.py` — 24 tests, 21
+of them fast.
+
+Four things worth recording:
+
+- **The loader validates rather than reads.** `yaml.safe_load` returns `Any`,
+  and a wrong number in a config produces a filter that *runs* and answers
+  worse. So the module applies the same containment `erp.sim.mujoco` applies to
+  `mj.*`: every value passes an `_as_*` coercion that returns a concrete type or
+  raises. `bool` is rejected where a number belongs, because it is an `int`
+  subclass and `rate_hz: true` would otherwise load as 1 Hz.
+- **Axis maps are checked for orthogonality, not just shape.** A matrix 1% off a
+  rotation is not a shape error and not a unit error — the reading is still a
+  3-vector in m/s², simply 1% too large on every axis, for the whole run, in a
+  way no `R` describes. The paired test confirms the check is orthogonality and
+  not tidiness: a 30° rotation about z still loads.
+- **`erp/io/__init__.py` deliberately does not re-export the loader.** It imports
+  `IMUDecoder`, so re-exporting would make `import erp.io` pull `erp.sensors` in
+  with it — and `erp.fusion` may depend on `erp.io` while never reaching
+  `erp.sensors`. That is the indirect reach-through the CI grep cannot see, so
+  `test_config.py` asserts it in a subprocess instead.
+- **`inputs.rate_hz` was 200 and is now 25.** Not a finger leftover being
+  stripped but a wrong value being corrected: no arm run has ever used 200, the
+  notebook streams at 25 (`STREAM_RATE_HZ`), and the golden run was generated at
+  25. Before P7 nothing read the key, so it was inert; a loader makes it a
+  number handed to callers.
+
+The stripped finger sections — `joints`, `imu_proximal`, `imu_distal`,
+`gyro_proximal`, `encoders`, `finger_ekf`, `finger_ekf_blind` — were **moved to
+ADR-0001 appendix A verbatim**, not deleted, per § 5.3. Their comments are the
+only record of why those numbers were what they were; the `psd_act` note in
+particular ("at 1.0e-6 the filter is 959× overconfident", "8.0e-4 holds
+0.918–1.039 of the chi-squared target over five disjoint 20-run blocks") is a
+result, not a setting.
+
+*Still open, deliberately:* `MeasurementLog` still stores `(t, Z, rows)` and
+drops `R`, the item P6 left for this phase. It did not move: teaching the log to
+carry `R` changes the on-disk CSV format, and the golden run reads one. It
+belongs with a log-format change, not with a config loader, and is now P7.5's.
+
 **P7.5 — `erp.runtime.session`.** *(M3 — the last phase before hardware)* `Mode`, `Session`, `build_session` — the
 single construction point of 4.8, plus the two CI greps that keep it single.
+**Also `build_sensor()`, moved here from P7** (see that entry): it names a
+concrete `Sensor` class, which only this module may do, so it arrives with the
+grep that enforces that rather than one phase ahead of it. It takes the
+`ImuConfig` P7 already produces and the decoder `build_decoder()` already
+builds. **And `MeasurementLog` carrying `R`**, the item P6 deferred to P7 and P7
+deferred again: it changes the on-disk CSV format that the golden run reads, so
+it belongs with a log-format change rather than with a config loader.
+
+*Noted at P7, before the grep exists:* **§ 4.8's driver-name grep as written
+fails today, on prose.** `grep -rlE "SerialIMUSensor|..."` matches docstrings,
+and eleven files mention a driver class while importing none — `core/clock.py`,
+`estimators/ekf.py`, `fusion/runner.py`, `io/config.py`, `io/log.py`,
+`calibration/rest.py` and their caches. Naming the class you are explaining why
+you do *not* construct is normal and good; the grep has to distinguish an import
+from a mention. Restricting it to `--include="*.py"` and to import statements
+and call sites is enough: on the current tree the only real hits are
+`erp/robot/__init__.py` and `erp/sensors/{__init__,sim}.py`, all already exempt.
 Add the M2 fault injection (`SimSensor` jitter, drops, device-clock drift,
 reader death) and point `DryRunArm` at the measured 395 ms. At the end of this
 phase the notebook selects a mode and nothing else changes between them, which
@@ -1755,7 +1843,7 @@ A phase is not done until its row passes.
 | P4 | EKF equals a closed-form KF on a linear model, no mujoco (checked in a subprocess) | a plain `(I-KH)P` update must fail the round-off case (min eig −3.6e-17 vs +5.0e-19) | **done** |
 | P5 | 25 x 2 ms predicts equal one 50 ms advance | out-of-order input increments `.discarded`; **equal** injected latencies must NOT reorder; `advance_to(now)` must lose the samples `advance_to_safe` keeps | **done** |
 | P6 | calibrated `R` changes the filter's NIS | an invalid calibration must be refused, not returned as a zero bias; and `rest_bias` reproduces the cell bit-for-bit | **done** |
-| P7 | config round-trips to `IMUDecoder`; rows contiguous | the swapped wiring must produce a worse fit | not started |
+| P7 | config round-trips to `IMUDecoder`; rows contiguous | the swapped wiring must produce a worse fit (held by `test_golden_run`, which P7 links to the YAML); plus a reordered layout must break contiguity, and each malformed-config test is paired with the good file it mutates | **done, reshaped** |
 | P7.5 | M1 and M2 agree on the same log; one driver runs all three | **equal** injected latencies must NOT produce reordering | not started |
 | P8 | `ConsistencyReport` reproduces the notebook's NIS median | a constant-`Q` variant must fail the same check | not started |
 

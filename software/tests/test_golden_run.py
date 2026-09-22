@@ -61,9 +61,11 @@ GOLDEN_SCALARS = (
     "nsensordata",
 )
 
-# The wiring the config's fit rejects: IMU_1 on link1, IMU_0 on link2. This is
-# what software/tests/conftest.py and IMUDecoder's own docstring still claim,
-# and what config/estimation.yaml contradicts with measured residuals.
+# The wiring the config's fit rejects: IMU_1 on link1, IMU_0 on link2. Until
+# ADR-0002 P7 this was also what software/tests/conftest.py and IMUDecoder's own
+# docstring claimed; both were corrected to match config/estimation.yaml, whose
+# measured residuals are the reason this assignment is the wrong one. It
+# survives here as the falsification and nowhere else in the tree.
 SWAPPED_LAYOUT = {
     "link1_acc":  ("IMU_1.ax", "IMU_1.ay", "IMU_1.az"),
     "link2_acc":  ("IMU_0.ax", "IMU_0.ay", "IMU_0.az"),

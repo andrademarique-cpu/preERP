@@ -36,15 +36,15 @@ git lfs install
 pip install -e ".[dev]"                 # add [app] for real hardware, [viz] for matplotlib
 conda env create -f environment.yml     # installs -e .[dev,viz]; already satisfied by `EKF`
 
-# The checks CI runs, in order. Timings measured in `EKF` on this machine.
+# The checks CI runs, in the order ci.yml runs them. Timings on this machine.
 ruff check software/src software/tests  # clean; rule set pinned via [tool.ruff.lint] select
-mypy software/src                       # strict; clean (36 files)
-pytest -q                               # 241 passed, 12 FAILED, 1 skipped, ~6.1 s -- see below
-grep -rEl ...                           # import-direction, the 4th CI step; see below
+mypy software/src                       # strict; clean (37 files)
+grep -rEl ...                           # import-direction, the 3rd step -- BEFORE pytest
+pytest -q                               # 277 passed, 1 skipped, ~2.6 s -- green
 
 # The fast loop while working. `mujoco` marks the tests that need mujoco AND
 # the Git-LFS model assets -- that shared requirement, not what they assert.
-pytest -q -m "not mujoco"               # 206 passed, 1 skipped, 47 deselected, ~4.3 s -- green
+pytest -q -m "not mujoco"               # 227 passed, 1 skipped, 50 deselected, ~1.7 s -- green
 
 # The golden check. Not a separate CI step: `test_golden_run.py` imports
 # `run_pipeline` from this script, so `pytest` covers it. Run it directly
@@ -60,45 +60,52 @@ grep -rEl "^\s*(from|import)\s+erp\.(sensors)" software/src/erp/estimators softw
 # any match is a violation -- the command should print nothing
 ```
 
-### The golden check is RED right now, and the code is not why
+### If the golden check goes red, suspect the log before the code
 
-Verified 2026-09-21. `pytest -q` fails 12 tests, all in
-`test_golden_run.py`, and `make_golden_run.py --check` reports shape
-mismatches (**1872** steps against the fixture's 1848) plus large rtol
-misses on `NIS_ekf`, `imu_bias`, `lag_imu` and the NIS scalars.
+**It was red from `677540e` until `60e2d07` (2026-09-22), and the code
+was never why.** That episode is worth keeping, because the shape of it
+will recur: `677540e` committed a 2026-09-21 *re-recording* of
+`data/raw/imu_trajectory_raw.csv` (73 measurements / 1872 steps / 3.60 s
+against the fixture's 72 / 1848 / 3.55 s) **without** regenerating
+`data/processed/golden_ekf_run.npz`. `pytest -q` failed 12 tests, all in
+`test_golden_run.py`, `--check` reported shape mismatches plus large
+rtol misses on `imu_bias` and the NIS scalars, and CI on `main` was red
+on a **clean tree** — so the advice this section used to give, "check
+`git status` on `data/raw/`", pointed at nothing.
 
-**This is a data change, not a code change.** The working tree has an
-uncommitted *re-recording* of `data/raw/imu_trajectory_raw.csv` (and
-`data/raw/palletizer_traj.npz`). It has been re-recorded more than once
-while this work was going on — 72 measurements / 1869 steps / 3.59 s at
-one point, **73 / 1872 / 3.60 s** now — so take the exact figures here as
-an illustration and re-read them from `--check`. Proof that the code is
-not at fault:
-`run_pipeline(root_dir=...)` pointed at a shadow root holding the
-**committed** CSV (recovered from `.git/lfs/objects/12/0a/120a1573…`)
-reproduces the fixture at `rtol=1e-12`, every key, on the unchanged
-working-tree source.
+The diagnosis that worked, and the one to repeat: `run_pipeline(root_dir=...)`
+pointed at a shadow root holding the *previously committed* CSV
+(recovered from `.git/lfs/objects/12/0a/120a1573…`, or just
+`git show <rev>:<path>` plus the LFS object) reproduced the fixture at
+worst rtol **0.000e+00**, every key, on unchanged sources. That isolates
+data from code in about a minute and is worth doing before reading a
+single line of the estimator.
 
-So before diagnosing a golden-run failure, check `git status` on
-`data/raw/`. The options, in order of preference:
+`60e2d07` restored the log. The options, in order of preference:
 
-1. `git checkout -- data/raw/imu_trajectory_raw.csv` if the new
-   recording was incidental — the fixture goes green again immediately.
+1. `git checkout <rev> -- data/raw/imu_trajectory_raw.csv` if the new
+   recording was incidental — the fixture goes green immediately. Note
+   the `<rev>`: once the recording is committed, a bare
+   `git checkout --` restores the *failing* file.
 2. Keep the new recording *and* regenerate the fixture
    (`python scripts/make_golden_run.py`, no `--check`) — but that is the
    deliberate act described below, and it must be committed together
    with the CSV in one commit that says so. A regenerated fixture
    defends nothing unless the log it was generated from is the log in
-   the tree.
+   the tree. Costed: it moves `nis_median_moving` 29.10 → 42.4 and every
+   figure quoted from the fixture in this file and in ADR-0002 with it.
 
 Do **not** loosen `--rtol` to paper over this; the failure is in the
 shapes, which no tolerance reaches.
 
-The re-recording is also why the notebook is modified: cell 14 commits
-`SEND_TO_ROBOT = True` and cell 15 `RUN_ROBOT_WITH_IMU = True`, with
-`ROBOT_PORT = "COM6"` and `IMU_PORT = "COM7"` hard-coded. Running
+That re-recording is also why the notebook changed, and **those changes
+are committed**: cell 14 has `SEND_TO_ROBOT = True` and cell 15
+`RUN_ROBOT_WITH_IMU = True`, with `ROBOT_PORT = "COM6"` and
+`IMU_PORT = "COM7"` hard-coded. Running
 `notebooks/mypalletizer260EKF.ipynb` top to bottom **opens both serial
-ports and drives the arm**. ADR-0002 § 3.1 is still accurate about this.
+ports and drives the arm** — that is the state of `main`, not a dirty
+working tree, so it is what a fresh clone gets. ADR-0002 § 3.1 is still
+accurate about this.
 
 **Run the golden check before and after any change to the estimation
 path.** `data/processed/golden_ekf_run.npz` is a frozen end-to-end run of
@@ -154,6 +161,13 @@ file is at the root and already points at the nested sources
 (`packages.find` → `software/src`, `testpaths` → `software/tests`). The
 `pip install -e "./software[dev]"` form is not a typo but an
 impossibility.
+
+**`pyyaml` is also core, since P7**, on the same test: `erp.io.config`
+imports it at module scope to turn `config/estimation.yaml` into the
+typed dataclasses that are now the single definition of the IMU wiring,
+and a config file is not device access. It is pure Python and installs
+everywhere, so none of the reasons that keep `pyserial` and `pymycobot`
+in `[app]` apply to it.
 
 **Dependencies are declared once, in `pyproject.toml`.**
 `environment.yml` supplies only the interpreter and pip, then installs
@@ -544,16 +558,16 @@ re-derive. Each has a test that would fail if it stopped being true.
 | `software/src/erp/robot/` | `base` (`ArmInterface`, `JointMap`), `dry_run` (`DryRunArm`), `mypalletizer` (`MyPalletizerArm`) — **command sink, never a measurement source** | may depend on `core/`; nothing in the estimation stack may import it |
 | `software/src/erp/trajectory.py` | `sine_sweep`, `resample` — the setpoint profile | numpy only |
 | `software/src/erp/sensors/` | `base` (`Sensor` ABC), `stream` (threaded base), `imu_serial` (`IMUDecoder`, `SerialIMUSensor`), `replay`, `sim`, `clock` (`ClockSync` — device→host, *not* `core.clock`), `mujoco` (`rows_of`, `make_R`). `calibration_from_samples` is **re-exported, not defined here** — it moved to `calibration/` at P6 | may depend on `core/` and `calibration/` |
-| `software/src/erp/io/` | `log` (`MeasurementLog`), `paths` (`repo_root`, `resolve_repo_path`, `resolve_model_path`) | — |
+| `software/src/erp/io/` | `log` (`MeasurementLog`), `paths` (`repo_root`, `resolve_repo_path`, `resolve_model_path`), `config` (P7 — `load_config`, `build_decoder`, the frozen config dataclasses, `ConfigError`). **English** | `core/` only for `log`/`paths`. `config` imports `sensors.IMUDecoder`, so it is deliberately **not** re-exported from `io/__init__.py` — `import erp.io` must stay core-only, because `fusion/` may import `erp.io` and may never reach `sensors/`. A subprocess test pins it |
 | `software/src/erp/fusion/` | `runner` — `FilterRunner` (timestamps → filter steps), `History`, `Estimator` protocol. **English**, beside `core/`/`io/`, not beside `estimators/`: it decides *when* the filter steps, never what it computes. Landed at P5; the old `FusionEngine` it replaces was deleted and shares no design with it | builds on `core/` + `models/`; **never** `sensors/`, `robot/` or a wall clock |
 | `software/src/erp/calibration/` | `rest` — `calibration_from_samples` (moved here from `sensors/imu_serial.py` at P6, still re-exported there), `rest_bias` (the offline counterpart of `SerialIMUSensor.calibrate`). **English** | `core/` + numpy **only**; `sensors/` imports this, never the reverse |
 | `software/src/erp/viz/` | **empty** (P8). `__init__.py` carries a one-line docstring ("Plotting and visualisation helpers. Geometry only, no backend imports.") and nothing else — honor that "no backend imports" when P8 lands | — |
-| `software/tests/` | 254 tests. `conftest` (fake serial port + IMU layout), `test_sensor_contract` (one suite over all three `Sensor`s), `test_imu_serial`, `test_clock`, `test_replay_log`, `test_paths`, `test_plant`, `test_golden_run`, `test_robot`, `test_trajectory`, `test_core_clock`, `test_dynamics`, `test_ekf_linear`, `test_fusion_runner` (47, no mujoco — carries a verbatim copy of the old `run_imu_ekf` as a bit-identity oracle), `test_calibration` (11, 9 of them fast — same oracle trick against notebook cell 19's block) | — |
+| `software/tests/` | 278 tests. `conftest` (fake serial port + IMU layout), `test_sensor_contract` (one suite over all three `Sensor`s), `test_imu_serial`, `test_clock`, `test_replay_log`, `test_paths`, `test_plant`, `test_golden_run`, `test_robot`, `test_trajectory`, `test_core_clock`, `test_dynamics`, `test_ekf_linear`, `test_fusion_runner` (47, no mujoco — carries a verbatim copy of the old `run_imu_ekf` as a bit-identity oracle), `test_calibration` (11, 9 of them fast — same oracle trick against notebook cell 19's block), `test_config` (24, 21 of them fast — every malformed-config case paired with the good file it mutates) | — |
 | `scripts/` | `make_golden_run.py` — generates and re-checks the golden fixture. A **holding pen**: `run_imu_ekf` left at P5, so what remains is `estimate_lag` and `site_position_cov`, both P8's. When they go, M1 closes | not linted by CI |
 | `data/processed/` | `golden_ekf_run.npz` — the frozen run. Git-LFS | — |
 | `notebooks/` | `mypalletizer260EKF.ipynb` — **the driver application**; `viewer.ipynb` (MuJoCo viewer + `SimLog`); `finger_imu_toolkit.ipynb` (finger EKF rebuilt on `erp`); `finger_imu_practice.ipynb`, `Palletizer.ipynb` (reference) | may import anything |
 | `mechanical/mujoco_assets/` | `MyPalletizer260/MyPalletizer260.xml` + STL meshes, `axis_xyz.xml` — the model everything runs on | — |
-| `config/` | `estimation.yaml` — the fitted IMU layout, axis maps, rates. **No loader reads it**; the notebook mirrors the values by hand | — |
+| `config/` | `estimation.yaml` — the fitted IMU layout, axis maps, rates. **Read by `erp.io.config` since P7**, and now the definition rather than documentation; the notebook still mirrors the values by hand. The finger sections moved to ADR-0001 appendix A | — |
 | `data/raw/` | three short IMU logs (raw device columns, calibrated columns, and a layout-named variant) + `palletizer_traj.npz` | — |
 | `ros2_ws/src/erp_ros/`, `docs/hardware/`, `electronics/` | **empty** (`.gitkeep` only) | — |
 | `firmware/` | `potentiometer_logger/potentiometer_logger.ino` only — the Teensy IMU firmware is not in this repo | out of scope for Python changes |
@@ -645,32 +659,32 @@ one now. `get_project_root` is kept as an alias.
 
 `git log --oneline -5` and `git status` are the authority; this section
 goes stale on its own. **The ADR-0002 work is now committed** — as of
-2026-09-21 the tip is `587162f "P0-P4 development (0002 notebook)"`, and
-the earlier claim here that `3ada284` was the last commit is out of date.
-`587162f` does not follow the conventional-commit rule this file states;
-follow the convention anyway.
+2026-09-22 the tip is P7 (`erp.io.config`), on top of `60e2d07` (the
+golden-log restore) and `677540e` (`added calibration package`). Neither
+`587162f` nor `677540e` follows the conventional-commit rule this file
+states; follow the convention anyway.
 
-What is uncommitted is only data and the notebook:
-`data/raw/imu_trajectory_raw.csv`, `data/raw/palletizer_traj.npz` and
-`notebooks/mypalletizer260EKF.ipynb` — the 2026-09-21 hardware run.
-That is what turns the golden check red; see the top of this file before
-concluding anything about the code from it.
+The 2026-09-21 hardware run (`data/raw/imu_trajectory_raw.csv`,
+`data/raw/palletizer_traj.npz`, `notebooks/mypalletizer260EKF.ipynb`)
+was committed in `677540e`, and the CSV part of it was reverted in
+`60e2d07` because it had been committed without regenerating the golden
+fixture — see the top of this file. The notebook and `palletizer_traj.npz`
+were left as they are.
 
 Working: the `Sensor` stack (`SerialIMUSensor` + `IMUDecoder` over a
 Teensy, `ReplaySensor` with CSV loaders and paced release, `SimSensor`
 over recorded MuJoCo output, `ClockSync`), `MeasurementLog`, the MuJoCo
 `f/F/h/H` helpers and their paired forms, `erp.sim.plant`,
 `erp.robot`, `erp.trajectory`, `erp.core.clock`, the
-`DiscreteDynamics` seam, the blind EKF, and the palletizer notebook end
+`DiscreteDynamics` seam, the blind EKF, `erp.fusion.FilterRunner`,
+`erp.calibration`, `erp.io.config`, and the palletizer notebook end
 to end (trajectory → real arm + MuJoCo replay → IMU log → EKF →
-end-effector covariance). 196 tests collected; **183 pass, 12 fail, 1
-skipped** on the working tree as it stands, and all 12 failures are
-`test_golden_run.py` against the re-recorded log. Against the committed
-log the suite is 195 passed / 1 skipped, as it has been. `ruff` and
-`mypy --strict` are both clean, and `pytest -m "not mujoco"` is green
-(150 passed, 1 skipped, 45 deselected).
+end-effector covariance). 278 tests collected; **277 pass, 1 skipped**,
+`ruff` and `mypy --strict` (37 files) are clean, `pytest -m "not
+mujoco"` is green (227 passed, 1 skipped, 50 deselected), and
+`make_golden_run.py --check` reproduces the fixture at `rtol=1e-12`.
 
-**ADR-0002 phases P0, P0.5, P1, P2, P3, P3.5, P4, P5 and P6 are done.** Read
+**ADR-0002 phases P0, P0.5, P1, P2, P3, P3.5, P4, P5, P6 and P7 are done.** Read
 `docs/adr/0002-notebook-to-package.md` before starting any of the rest:
 each finished phase carries a *What landed* record, including where the
 plan turned out to be wrong and was changed on purpose (P3 was reshaped
@@ -695,8 +709,8 @@ package*, not a script, to reproduce the golden run, plus a
 left in `scripts/make_golden_run.py` is `estimate_lag` and
 `site_position_cov` — both P8's. **M1 now closes at P8 alone.**
 
-Not built: `viz/`, `analysis/`, `runtime/`, `ros2_ws/`, a loader for
-`config/estimation.yaml`, and any UKF. Online fusion exists
+Not built: `viz/`, `analysis/`, `runtime/`, `ros2_ws/`, and any UKF.
+Online fusion exists
 (`erp.fusion.FilterRunner`) but has only been run against `DryRunArm` +
 `SimSensor`, never against the Teensy.
 
@@ -712,16 +726,21 @@ Known open items:
   still supplies the setpoint values, endpoint included, so only the
   *timing* changes, and only when `span * rate_hz` is fractional — at the
   notebook's 3 s and 25 Hz the two are bit-identical.
-- **A fourth copy of the IMU wiring** lives in `sensors/imu_serial.py`
-  (its `IMUDecoder` docstring), siding with `conftest.py` against the
-  config. ADR-0002 § 3.3's table lists only three. Verified 2026-09-21,
-  the split is 2–2: `config/estimation.yaml:80-86` and
-  `scripts/make_golden_run.py:76-81` say **IMU_0 → link1, IMU_1 →
-  link2**; `software/tests/conftest.py:22-28` and
-  `software/src/erp/sensors/imu_serial.py:48` say the opposite. The
-  golden fixture was generated from the first pair, so that is the one
-  the numbers rest on — and the one to keep when P7's config loader
-  collapses the four into one.
+- ~~**A fourth copy of the IMU wiring** lives in `sensors/imu_serial.py`.~~
+  **Closed at P7.** The split was 2–2 and is now 4–0 on **IMU_0 → link1,
+  IMU_1 → link2**, the assignment the fit chose and the one the golden
+  fixture was generated from. `config/estimation.yaml` is the definition,
+  loaded by `erp.io.config`; `conftest.py` and the `IMUDecoder` docstring
+  were corrected to match it, and `test_config.py` asserts that
+  `scripts/make_golden_run.py`'s dict still agrees, so editing the YAML
+  alone now fails. The swapped form survives in exactly one place,
+  `test_golden_run.SWAPPED_LAYOUT`, as the falsification.
+
+  Worth knowing why it went undetected: the tests read the assignment
+  back out of `conftest.LAYOUT`, so they passed under either wiring while
+  serving the rejected one as the worked example. The corrected tests
+  derive block order from `LAYOUT` and assert the decoder's contract,
+  which holds whichever way the arm is wired.
 - ~~The `Measurement` → filter path is only half connected.~~ **Closed
   at P5**: `FilterRunner.ingest` takes a `Measurement` and passes `m.R`
   into `EKF.update`. One piece is deliberately left — `MeasurementLog`
@@ -745,11 +764,21 @@ Known open items:
 - IMU rate is ~20 Hz (50 ± 1 ms) against a 2 ms physics step, so there
   are ~25 predicts between updates. That ratio, not the filter, is the
   current accuracy limit.
-- The chip→link assignment disagrees between `config/estimation.yaml`
-  and `software/tests/conftest.py` (see above).
-- `config/estimation.yaml` still carries the whole finger section
-  (`joints`, `finger_ekf`, `finger_ekf_blind`, `imu_proximal`, …), which
-  no longer corresponds to any code.
+- ~~The chip→link assignment disagrees between `config/estimation.yaml`
+  and `software/tests/conftest.py`.~~ **Closed at P7** (see above).
+- ~~`config/estimation.yaml` still carries the whole finger section.~~
+  **Closed at P7.** `joints`, `finger_ekf`, `finger_ekf_blind`,
+  `imu_proximal`, `imu_distal`, `gyro_proximal` and `encoders` moved to
+  **ADR-0001 appendix A verbatim** rather than being deleted — their
+  comments are the only record of why those numbers were what they were,
+  and `psd_act`'s note ("at 1.0e-6 the filter is 959× overconfident") is
+  a result, not a setting. Do not copy a value out of that appendix into
+  the arm's config: they are continuous-time PSDs and `make_Q` takes
+  per-step DWNA sigmas.
+- `inputs.rate_hz` in the config was `200` and is now `25` — a wrong
+  value corrected at P7, not a finger leftover stripped. No arm run ever
+  used 200; the notebook streams at 25 (`STREAM_RATE_HZ`) and the golden
+  run was generated at 25. Before P7 nothing read the key.
 
 ## Documentation that no longer matches the code
 
@@ -786,12 +815,18 @@ Assume these are historical unless you have checked against the source:
   not yet in the package), **M2** real-time simulated operation with
   decoupled command and sensor clocks, **M3** the same code on physical
   hardware (the objective). Each phase is tagged with the milestone it
-  serves. **P7 is next** (`erp.io.config`: YAML into dataclasses, with
-  `build_decoder()` / `build_sensor()`, making `config/estimation.yaml`
-  the only wiring definition and settling the four-way disagreement
-  above), and **P8 is what closes M1** — the `ConsistencyReport` plus
-  `propagate_to_site`, which empties `scripts/make_golden_run.py`. P8 is
-  blocked by neither.
+  serves.
+
+  **Two phases remain, and neither blocks the other.** **P7.5**
+  (`erp.runtime.session`: `Mode`, `Session`, `build_session`, the two CI
+  greps of § 4.8, M2 fault injection — plus `build_sensor()`, moved out
+  of P7 because only that module may name a driver class, and
+  `MeasurementLog` carrying `R`, deferred twice because it changes the
+  CSV format the golden run reads) is the last phase before hardware.
+  **P8 is what closes M1** — the `ConsistencyReport` plus
+  `propagate_to_site`, which empties `scripts/make_golden_run.py`. P8
+  depends only on P5, so it is startable now; § 5.1 puts it outside the
+  phase groups on purpose.
 
   Unlike the documents above it, this one is **not** historical, and it
   is kept current as phases land rather than rewritten — a finished phase

@@ -26,12 +26,21 @@ def test_kv_and_csv_decode_identically(decoder: IMUDecoder) -> None:
     assert kv[1] == csv[1] == 123456.0
 
 
-def test_layout_puts_imu1_on_link1_and_imu0_on_link2(decoder: IMUDecoder) -> None:
+def test_layout_maps_device_channels_onto_mujoco_sensors(decoder: IMUDecoder) -> None:
+    """Every block of ``z`` holds the channels ``LAYOUT`` assigns to it, in order.
+
+    Read out of ``LAYOUT`` rather than written out again: which chip sits on
+    which link is declared once, in ``config/estimation.yaml`` (ADR-0002 P7),
+    and a test that restates it becomes a fifth copy to keep in step. What is
+    asserted here is the decoder's contract -- block order, axis order, column
+    names -- which holds whichever way the arm is wired.
+    """
     z = decoder.apply(RAW)
     dev = dict(zip(IMU_KEYS, RAW, strict=True))
-    np.testing.assert_array_equal(z[0:3], [dev[k] for k in LAYOUT["link1_acc"]])
-    np.testing.assert_array_equal(z[3:6], [dev[k] for k in LAYOUT["link2_acc"]])
-    np.testing.assert_array_equal(z[6:9], [dev["IMU_1.wx"], dev["IMU_1.wy"], dev["IMU_1.wz"]])
+    for i, block in enumerate(("link1_acc", "link2_acc", "link1_gyro", "link2_gyro")):
+        np.testing.assert_array_equal(
+            z[3 * i : 3 * i + 3], [dev[k] for k in LAYOUT[block]], err_msg=block
+        )
     assert decoder.column_names()[0] == "link1_acc_x"
 
 
@@ -39,9 +48,11 @@ def test_axis_map_is_applied_per_block() -> None:
     swap_xy_flip_z = np.array([[0, 1, 0], [1, 0, 0], [0, 0, -1]])
     dec = IMUDecoder(IMU_KEYS, LAYOUT, axis_maps={"link2_acc": swap_xy_flip_z})
     z = dec.apply(RAW)
-    ax, ay, az = RAW[0:3]  # IMU_0 accel
+    dev = dict(zip(IMU_KEYS, RAW, strict=True))
+    ax, ay, az = (dev[k] for k in LAYOUT["link2_acc"])
     np.testing.assert_array_equal(z[3:6], [ay, ax, -az])
-    np.testing.assert_array_equal(z[0:3], RAW[3:6])  # other blocks untouched
+    # Every other block passes through untouched.
+    np.testing.assert_array_equal(z[0:3], [dev[k] for k in LAYOUT["link1_acc"]])
 
 
 def test_to_raw_inverts_apply_with_axis_maps_and_bias() -> None:

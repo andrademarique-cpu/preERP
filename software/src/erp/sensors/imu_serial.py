@@ -50,8 +50,13 @@ class IMUDecoder:
 
     The device sends channels named by ``keys`` (e.g. ``IMU_0.ax``). The
     ``layout`` says which of those channels feed which MuJoCo sensor, in the
-    order the caller's ``rows`` list them -- this is where the physical
-    wiring (IMU_1 on link1, IMU_0 on link2) is recorded, instead of in code.
+    order the caller's ``rows`` list them -- this is where the physical wiring
+    is recorded, instead of in code. On the MyPalletizer260 that wiring is
+    **IMU_0 on link1, IMU_1 on link2**, and it is declared once, in
+    ``config/estimation.yaml``; build the decoder from it with
+    :func:`erp.io.config.build_decoder` rather than spelling the layout out
+    again. This docstring said the opposite until ADR-0002 P7 and was one of
+    the four disagreeing copies that phase existed to collapse.
 
     Calibrated output: ``z = A @ raw[idx] - b`` where ``A`` is block-diagonal,
     one ``axis_maps`` matrix per layout block, mapping device axes onto the

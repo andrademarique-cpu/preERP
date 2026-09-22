@@ -20,9 +20,17 @@ license = { text = "MIT" }
 #
 # scipy was removed here -- nothing has imported it since models/discretize.py
 # was deleted. Re-add it if a van Loan discretisation comes back.
+# pyyaml joined at ADR-0002 P7, as a core dependency rather than an extra, on
+# the same test the [app] extra fails: it is not device access. `erp.io.config`
+# imports it at module scope to turn config/estimation.yaml into the typed
+# dataclasses that are now the single definition of the IMU wiring, so a tree
+# without it cannot construct a decoder from the config at all. It is pure
+# Python and installs everywhere, so none of the reasons that keep pyserial and
+# pymycobot optional apply.
 dependencies = [
     "numpy",
     "mujoco>=3.11",
+    "pyyaml",
 ]
 
 [project.optional-dependencies]
@@ -95,6 +103,17 @@ ignore_missing_imports = true
 # attribute. That Protocol is the written record of the surface we depend on.
 [[tool.mypy.overrides]]
 module = ["pymycobot", "pymycobot.*"]
+ignore_missing_imports = true
+
+# PyYAML ships no py.typed marker, so `yaml.safe_load` is Any. Same containment
+# as mujoco above, and for the same reason: erp.io.config is the only module
+# that calls it, and every value it reads passes through one of that module's
+# `_as_*` coercions, which return a concrete type or raise ConfigError naming
+# the key. No Any reaches the dataclasses. Keep that discipline when adding a
+# field. (types-PyYAML would give real signatures, but safe_load is Any either
+# way, so it would buy nothing the coercions do not already have to do.)
+[[tool.mypy.overrides]]
+module = ["yaml", "yaml.*"]
 ignore_missing_imports = true
 
 [tool.ruff]
