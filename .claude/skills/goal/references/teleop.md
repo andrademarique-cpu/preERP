@@ -1,8 +1,9 @@
 # The interactive estimator demo — mechanics
 
 Everything in this file was checked against **this machine** on 2026-09-22:
-mujoco 3.11.0, pyqtgraph 0.14.0, PyQt5, Python 3.11.15 in the `EKF` env. Where a
-number appears it was measured, not recalled.
+mujoco 3.11.0, pyqtgraph 0.14.0, PyQt5, Python 3.11.15 in the `erp` env (there
+is no `EKF` env; the name was wrong here and in CLAUDE.md). Where a number
+appears it was measured, not recalled.
 
 ## The three signals
 
@@ -24,8 +25,8 @@ Print that sentence in the demo's own output, not only in the commit message.
 ## The model, as it actually is
 
 ```
-PLANT   nq 4  nv 4  nu 3  na 0   nsensordata 15   dt 0.002
-BLIND   nq 4  nv 4  nu 3  na 3   nx = 4+4+3 = 11
+PLANT   nq 4  nv 4  nu 3  na 0   nsensordata 15   dt 0.002   ngeom 27
+BLIND   nq 4  nv 4  nu 3  na 3   nx = 4+4+3 = 11             ngeom 27
 joints      rot, link1, link2, act
 actuators   rot_servo, link1_servo, link2_servo
 sensors     link1_acc, link2_acc, link1_gyro, link2_gyro, efector_pos
@@ -46,6 +47,33 @@ immediately on two of three:
 
 Clamp every jog to `model.actuator_ctrlrange`. Read it from the model — do not
 copy the table above into code.
+
+## The scene, and why the floor is inside a body
+
+`mechanical/mujoco_assets/scene.xml` holds the sky, the checkered ground and the
+offscreen framebuffer size; the arm XML pulls it in with one `<include/>` as its
+last child. All visual — stepped 1848 times (the golden run's length) against a
+model with the scenery deleted, `max |sensordata diff|` is **0.000e+00**, and
+`make_golden_run.py --check` still reproduces at `rtol=1e-12`.
+
+**The floor lives in its own `<body name="scenery">`, and that is load-bearing.**
+MuJoCo numbers geoms by body and the world is always body 0, so a geom hung
+straight off `<worldbody>` takes id 0 and shifts every geom of the arm up by one
+*wherever it is written in the file* — which moves the mesh ids the ghost looks
+up. In its own static body, created after the arm, it collects the last id
+instead: meshes stay at `[0, 1, 2, 10, 18]` with `geom_dataid [0, 1, 2, 3, 4]`,
+and `floor` is geom 26. `test_plant.py` asserts both, and the falsification was
+run: lifting the geom into `<worldbody>` gives meshes `[1, 2, 3, 11, 19]`.
+
+Checker squares are `1 / texrepeat` metres — **measured**, by rendering from a
+known height and counting. The obvious reading, `1 / (2 * texrepeat)` because the
+builtin checker is a 2×2 pattern, is off by a factor of two.
+
+**`mujoco.Renderer` works headlessly here**, which is how the look was checked
+without opening a window. Two gotchas, both hit: the offscreen framebuffer
+defaults to 640x480 and the renderer refuses anything larger (`scene.xml` now
+sets 1280x720), and a second `Renderer` in the same process renders black unless
+the first is `.close()`d.
 
 ## Verified API surface
 
@@ -92,27 +120,56 @@ for i in range(mb.ngeom):
         db.geom_xpos[i], db.geom_xmat[i].reshape(9), GHOST_RGBA,
     )
     if int(mb.geom_type[i]) == MESH:
-        g.dataid = int(mb.geom_dataid[i])     # <-- mjv_initGeom does NOT set this
+        g.dataid = 2 * int(mb.geom_dataid[i])  # <-- NOT set by initGeom, and NOT geom_dataid
     g.objtype = int(mj.mjtObj.mjOBJ_UNKNOWN)  # not pickable
     scn.ngeom += 1
 ```
 
-**`mjv_initGeom` leaves `dataid = -1` on every geom**, verified. It sets the
+There are **two** traps in that one field, and the second was found the hard way
+— it shipped in `efc8df7` and was what "the ghost is oriented wrong" turned out
+to be.
+
+**1. `mjv_initGeom` leaves `dataid = -1` on every geom**, verified. It sets the
 fields it is passed and defaults the rest, and `dataid` is not one of them.
 
-Why that matters more than it sounds: this model's 26 geoms are **5 meshes, 12
-spheres, 9 cylinders**, and the meshes at indices `[0, 1, 2, 10, 18]`
-(`dataid [0, 1, 2, 3, 4]`) are *the visible arm*. Forget the `dataid` line and
-the spheres and cylinders still draw, so the ghost half-appears — a scattering
-of decorations where the arm should be. It reads as a rendering glitch rather
-than a missing line, which is why it is worth knowing in advance.
+This model's 27 geoms are **5 meshes, 12 spheres, 9 cylinders and the ground
+plane**, and the meshes at indices `[0, 1, 2, 10, 18]` are *the visible arm*.
+Forget the `dataid` line and the spheres and cylinders still draw, so the ghost
+half-appears — a scattering of decorations where the arm should be.
 
-The geom construction is pure array work and **runs headless**, so test it: pose
-the ghost away from truth and assert `geom_xpos` differs and the mesh `dataid`s
-survive. That is how this trap was found.
+**2. The value is `2 * geom_dataid`, not `geom_dataid`.** The render context
+holds **two entries per mesh**, and `mjv_updateScene` — MuJoCo building the same
+scene for itself — writes the doubled index. Measured: `geom_dataid` over those
+five geoms is `[0, 1, 2, 3, 4]`; the renderer's own scene gives them
+`[0, 2, 4, 6, 8]`.
+
+Pass the undoubled value and geom `k` draws mesh `k // 2`: base_link's hull on
+`rot`, rot's mesh on `link1`, rot's hull on `link2`, link1's mesh on `act`. Every
+mesh carries its own compiled frame (`mesh_quat` is ~120° off identity on four of
+the five), so a wrong mesh at a right frame **reads as a rotation bug**. That is
+what makes it expensive: you go looking at `geom_xmat`, at `mj_forward`, at the
+filter's state — and `mat` is fine. Verified: MuJoCo's own scene geoms match
+`geom_xmat` exactly, so `mjv_initGeom` copies the orientation correctly.
+
+The geom construction is pure array work and **runs headless**, so test it —
+but not against a hand-written expectation. The original test asserted
+`dataid == geom_dataid`, which proved the field had been *set* and never that it
+had been set to what the renderer reads, so it pinned the bug for two commits.
+**Use `mjv_updateScene` as the oracle**: build a real scene over the plant at the
+same `qpos`, index it by `objid` (it emits 29 geoms against the model's 26, so
+order is not identity), and assert type, pos, mat *and* dataid all agree.
+`test_viz_live.py` does this now.
+
+**Draw only what can move.** `ghost_geom_ids` keeps geoms whose body is not
+welded to the world (`body_weldid != 0`) — 25 of 27 here. The two it drops are
+the ground plane from `scene.xml`, which would otherwise be painted as a
+translucent plane exactly coplanar with the real floor (z-fighting and a
+blue-tinted ground), and `base_link`, which is bolted down and so can never show
+error. **Scene slot is therefore not model geom id**: anything mapping back has
+to go through `ghost_geom_ids`.
 
 Alpha ~0.35 reads as a ghost without hiding the truth. Keep `maxgeom` headroom —
-26 geoms against a 200 default is not close.
+25 drawn geoms against a 200 default is not close.
 
 ## Timing
 
@@ -187,12 +244,33 @@ Three actuators, so three jog pairs plus the controls the demo needs. Print it
 on screen; do not make the user read the source.
 
 ```
- Q / A    rot_servo    -/+          SPACE   hold position
- W / S    link1_servo  -/+          R       re-home (warmup_to_rest)
- E / D    link2_servo  -/+          G       toggle ghost
+ Q / A    rot_servo    +/-          P       toggle ghost
+ E / D    link1_servo  +/-          O       re-home (warmup_to_rest)
+ U / J    link2_servo  +/-          X       stop
                                     ESC     quit
 ```
 
-Jog by a fixed increment per tick while held, clamped to `actuator_ctrlrange`.
-A rate of roughly 0.5 rad/s is controllable; faster than ~2 rad/s and the
-servos saturate, which looks like a filter problem and is not.
+**Every letter A–Z is already a viewer shortcut**, so there is no key the viewer
+ignores — `mjVISSTRING` and `mjRNDSTRING` between them assign one to all 26. What
+you get to choose is *which* collision, and the two classes are not equivalent:
+
+| Class | Examples | Reachable from Python? |
+|---|---|---|
+| `mjvOption` flags | `Q` camera, `A` auto-connect, `E` equality, `D` static body, `U` actuator, `J` joint, `O` perturb object, `P` contact split, `X` texture | **Yes** — `viewer.opt`, so re-assert it every tick and the toggle lasts under one frame |
+| render flags | `W` wireframe, `S` shadow, `R` reflection, `G` fog, `K` skybox, `L` additive | **No** — they live on the internal `mjvScene`, and the passive `Handle` exposes only `cam`, `opt`, `perturb`, `user_scn`, `m`, `d` |
+
+The keymap above uses only the first class. The one it replaced used `W`/`S` for
+link1 and `G`/`R` for ghost/re-home — all four in the second — so jogging a joint
+turned on wireframe and killed the shadows, which reads as the ghost rendering
+badly rather than as the viewer working correctly. Snapshot `viewer.opt.flags`
+and `viewer.opt.geomgroup` after `launch_passive` and rewrite them at the top of
+each tick under `viewer.lock()`; pass `show_left_ui=False, show_right_ui=False`
+as well, but do not rely on hiding the panels alone — whether that also stops the
+dispatch was never verified.
+
+**`key_callback` fires on press only, never on release.** So "jog while held" is
+not implementable: there is no release event to stop on. Either one press is one
+step (0.01 rad at 0.6 rad/s and 60 Hz — 150 presses to cross a range), or the key
+latches and an explicit stop key clears it. The demo latches. A rate of roughly
+0.5 rad/s is controllable; faster than ~2 rad/s and the servos saturate, which
+looks like a filter problem and is not.

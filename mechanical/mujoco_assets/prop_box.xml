@@ -1,0 +1,38 @@
+<!-- Prop: una caja. UNO de los objetos opcionales del entorno.
+
+     NO lo incluye MyPalletizer260.xml. Lo incluye solo el modelo envoltorio
+     MyPalletizer260/MyPalletizer260_box.xml, que es lo que carga la demo cuando
+     se le pasa `--prop box`. Con `--prop none` (el default) no se carga ningun
+     prop y la escena queda como estaba.
+
+     POR QUE NO VA EN EL XML DEL BRAZO. `erp.sim.plant.blind_variant` compila el
+     MISMO archivo que `load_model`, asi que un prop metido en el XML del brazo
+     terminaria tambien dentro del modelo sobre el que corre el EKF. Separandolo,
+     el filtro NO SABE que la caja existe: un golpe es dinamica NO MODELADA y el
+     NIS pega un salto. Eso es la demo funcionando, no fallando.
+
+     COLISION. contype=1 / conaffinity=2, la misma clase que el piso de
+     scene.xml. Da contacto contra el 2/1 del `ee_collider` y NO contra el 0/0
+     que heredan todos los eslabones del brazo.
+
+     ESTATICO, SIN JUNTAS, a proposito. Un <freejoint> llevaria nq de 4 a 11 y nv
+     de 4 a 10, con lo cual el nx del modelo ciego pasa de 11 a 23 y cambia la
+     forma de cada array del fixture congelado. mass="0" ademas lo deja fuera de
+     cualquier cuenta de inercia.
+
+     ADENTRO DE <body>: un geom colgado directo del <worldbody> se lleva el id 0
+     y renumera todos los geoms del brazo, que es como una decoracion rompe el
+     fantasma (`erp.viz.ghost` resuelve la malla por geom_dataid). -->
+<mujoco model="prop_box">
+  <worldbody>
+    <!-- Cubo de 8 cm apoyado en el piso (pos z = media altura), JUSTO ENFRENTE
+         del brazo: en `home` el efector esta en (0.001, 0.164, 0.221), asi que
+         +y es el frente. Radial 0.160 m, bien dentro del alcance (max 0.2174 m),
+         y el efector llega a 1.5 cm de la altura de contacto. El brazo arranca
+         sin tocarlo: ncon = 0 en el keyframe y despues de asentarse. -->
+    <body name="box">
+      <geom name="box_geom" type="box" pos="0 0.160 0.040" size="0.040 0.040 0.040"
+            mass="0" contype="1" conaffinity="2" rgba="0.80 0.55 0.25 1"/>
+    </body>
+  </worldbody>
+</mujoco>

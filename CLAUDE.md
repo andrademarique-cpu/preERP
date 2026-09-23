@@ -22,35 +22,54 @@ you are re-adding that drift.
 
 ## Commands
 
-**The dev env on this machine is called `EKF`, not `erp`.** Verified
-2026-09-21: `conda env list` shows only `base`, `EKF` and `MATH`. `EKF`
-is Python 3.11.15 with numpy 2.4.6, mujoco 3.11.0, ruff 0.16.4, pytest
-9.1.1, matplotlib, and `erp` installed editable against this checkout —
-i.e. it is what `environment.yml` describes, just under a different
-name. `conda env create -f environment.yml` has never been run here, and
-running it would build a *second* environment rather than fix anything;
-`conda activate EKF` is the correct move. `base` is Python **3.14.6**
-(not 3.13 as this file used to say) and does not have the package.
+**The dev env on this machine is `erp` — the name `environment.yml`
+declares. Run `conda activate erp`.** Re-verified 2026-09-22 by running
+the commands: `conda env list` gives `base`, `ML`, `erp`, `loco-mujoco`
+and `nemotron`. `erp` is Python 3.11.15 with numpy 2.4.6, mujoco 3.11.0,
+ruff 0.16.3, pytest 9.1.1, mypy 2.3.1, matplotlib 3.11.1, pyyaml 6.0.3
+and the package installed editable against this checkout. `base` is
+Python **3.13.9** and does not have the package.
 
-Note also that `EKF` **does** have `pyserial` 3.5 and `pymycobot` 4.0.7
-installed — the `[app]` extra, which the section below says is absent.
-See the correction under "`mujoco` is a core dependency".
+**This paragraph previously said the env was called `EKF`, that a `MATH`
+env existed and that `base` was 3.14.6 — none of which is true, and
+neither env exists.** It was asserted as "Verified 2026-09-21" and it was
+not; it is the one claim in this file that a reader hits before any
+other, and it fails on the first command. Treat it as the warning:
+re-run a fact before re-stating it, and if you cannot run it, say it is
+unverified rather than dating it. The rest of this file's measured
+numbers *were* re-checked on 2026-09-22 and held exactly — see "Current
+repo state".
+
+Note that `erp` has `pyserial` 3.5 but **not** `pymycobot`, so the
+`[app]` extra is only half-installed here. See the correction under
+"`mujoco` is a core dependency". It also still carries `scipy` 1.17.1,
+and `pip show erp` reports `Requires: numpy, scipy` — metadata from an
+install that predates P0's dependency change. Nothing imports scipy;
+re-run `pip install -e ".[dev]"` if you want the metadata to match
+`pyproject.toml`.
 
 ```bash
 # Setup (either path) -- from the REPO ROOT, note the "."
 git lfs install
 pip install -e ".[dev]"                 # add [app] for real hardware, [viz] for matplotlib
-conda env create -f environment.yml     # installs -e .[dev,viz]; already satisfied by `EKF`
+conda env create -f environment.yml     # installs -e .[dev,viz]; already satisfied by `erp`
 
 # The checks CI runs, in the order ci.yml runs them. Timings on this machine.
 ruff check software/src software/tests  # clean; rule set pinned via [tool.ruff.lint] select
 mypy software/src                       # strict; clean (48 files)
 grep -rEl ...                           # import-direction, the 3rd step -- BEFORE pytest
-pytest -q                               # 339 passed, 1 skipped, ~3.6 s -- green
+pytest -q                               # 342 passed, 1 FAILED, 1 skipped -- RED, see below
+
+# RED as of 2026-09-23, on the WORKING TREE only -- `main` at efc8df7 is green.
+# test_plant.py::test_the_scenery_is_index_safe asserts the floor does not
+# collide; the uncommitted scene.xml gives it contype=1/conaffinity=2 on
+# purpose. The test and the XML are two halves of the same unfinished change
+# and they disagree. See "The half-landed collision work" below -- do not
+# "fix" it by deleting the assertion until you have read which half is right.
 
 # The fast loop while working. `mujoco` marks the tests that need mujoco AND
 # the Git-LFS model assets -- that shared requirement, not what they assert.
-pytest -q -m "not mujoco"               # 284 passed, 1 skipped, 55 deselected, ~2.5 s -- green
+pytest -q -m "not mujoco"               # 284 passed, 1 skipped, 59 deselected, ~2.5 s -- green
 
 # The golden check. Not a separate CI step: `test_golden_run.py` imports
 # `run_pipeline` from this script, so `pytest` covers it. Run it directly
@@ -130,7 +149,7 @@ Windows, and CI runs ubuntu on 3.10 and 3.11, so a cross-platform failure
 is plausible and the honest fix is loosening to ~1e-9, not regenerating
 per platform. The fixture's own metadata confirms how narrow the evidence
 is — `meta_platform` is `Windows-10-10.0.26200-SP0`, `meta_python`
-3.11.15, `meta_numpy` 2.4.6, `meta_mujoco` 3.11.0, i.e. exactly the `EKF`
+3.11.15, `meta_numpy` 2.4.6, `meta_mujoco` 3.11.0, i.e. exactly the `erp`
 env on this one machine. And the lag it reports is 400 ms against the
 ~395 ms quoted below — a 2.5 ms search grid makes those adjacent points,
 but the two figures may simply come from different recordings. Three
@@ -146,14 +165,16 @@ installed `.[dev]` and type-checked a tree missing its central
 dependency. The `[app]` extra is now device access only: `pyserial` for
 the Teensy, `pymycobot` for the arm, both imported lazily.
 
-**Correction (verified 2026-09-21): both ARE installed in `EKF`** —
-`pyserial` 3.5 and `pymycobot` 4.0.7, presumably because the notebook
-drives real hardware from this env. So "importing `erp.robot` must not
-need `pymycobot`" is *not* being tested locally; it is a formality here
-and a real test only in CI, which installs `.[dev]` alone. If you touch
-the lazy-import boundary in `robot/mypalletizer.py` or
-`sensors/imu_serial.py`, a green local `pytest` proves nothing about it —
-CI is the check that matters.
+**Correction (re-verified 2026-09-22): `pyserial` 3.5 IS installed in
+`erp`; `pymycobot` is NOT.** (This paragraph used to claim both were, at
+4.0.7. It was wrong, like the env name above.) The consequence differs
+per package, so do not collapse them: the `erp.robot` -> `pymycobot`
+lazy boundary **is** exercised locally — a green local `pytest` is real
+evidence there, and `MyPalletizerArm` cannot reach hardware from this env
+until you `pip install -e ".[app]"`. The `sensors/imu_serial.py` ->
+`pyserial` boundary is the one that is *not* tested here, because the
+package is present; CI, which installs `.[dev]` alone, is the only check
+on it.
 
 Since ADR-0002 phase P4 the estimator no longer imports mujoco at all:
 `estimators/ekf.py` holds a `DiscreteDynamics` (a numpy-only protocol in
@@ -180,7 +201,8 @@ in `[app]` apply to it.
 Not folded into `[viz]`: that is matplotlib, and this is a different
 backend for a different job. matplotlib redraws a whole figure and
 cannot hold a 30 Hz strip, which makes the viewer stutter in a way that
-reads as a physics problem. Both are already installed in `EKF`, and
+reads as a physics problem. Both are already installed in `erp`
+(pyqtgraph 0.14.0, PyQt5 5.15.11), and
 `pyproject.toml` has carried a comment since P0 about pyqtgraph having
 been a dependency here once. Nothing in `erp/` imports either at package
 scope — `erp/viz/__init__.py` withholds `erp.viz.live` — so a tree
@@ -488,6 +510,35 @@ These were measured, not assumed, and re-deriving them is expensive:
 - **The `home` keyframe uses `act = 1.5693`, not 1.57**, so the tendon
   equality is satisfied exactly and the solver does not shove the arm on
   the first step.
+- **The scenery's floor is inside `<body name="scenery">`, and that is
+  the whole trick, not tidiness.** MuJoCo numbers geoms by body and the
+  world is body 0, so a geom hung straight off `<worldbody>` takes id 0
+  and renumbers the arm *wherever it sits in the file* — which moves the
+  mesh ids `erp.viz.ghost` resolves through `geom_dataid`. In its own
+  static body, created after the arm, it takes the last id instead:
+  meshes stay `[0, 1, 2, 10, 18]`, `geom_dataid` stays `[0, 1, 2, 3, 4]`.
+  Verified both ways — lifting it into `<worldbody>` gives
+  `[1, 2, 3, 11, 19]`. `test_plant.py` pins it. **That invariant is the
+  point and it still holds; the id it used to quote does not.** Measured
+  2026-09-23 on the working tree: `ngeom` is **28**, `ee_collider` is geom
+  **26** and `floor` is geom **27** — this file said "floor is geom 26"
+  and that was true only before the collider landed. Quote the mesh ids
+  and `geom_dataid`, which are what `erp.viz.ghost` actually resolves
+  through; they have not moved and they are what the guard defends.
+- **The floor is no longer visual-only, and "physics-free" now needs
+  splitting in two.** The uncommitted `scene.xml` gives it
+  `contype=1`/`conaffinity=2` so the new `ee_collider` rests on it instead
+  of sinking — the effector's reachable set goes down to z = −0.038 m,
+  below the floor plane. What is still exactly true: the scenery does not
+  move *the golden run*, 1848 steps against a scenery-deleted build giving
+  `max |sensordata diff| = 0.000e+00`, and the falsification test
+  `test_the_scenery_does_not_move_the_physics` still passes — because the
+  golden trajectory never touches
+  the floor (`ncon = 0` across its states). What is no longer true is the
+  general claim: a run that *does* reach the floor now gets a contact
+  force, and the golden fixture is silent about that case because it never
+  enters it. `make_golden_run.py --check` re-verified green at `rtol=1e-12`
+  with the collider and solid floor in place.
 - **Initialise from the servoed equilibrium, not zeros.**
   `erp.sim.plant.warmup_to_rest` warms up 100 steps under the command.
   Measured `link2_acc_x` at rest: **9.810** from the warmed equilibrium,
@@ -628,22 +679,24 @@ re-derive. Each has a test that would fail if it stopped being true.
 | `software/src/erp/estimators/` | `ekf` — `EKF` over a `DiscreteDynamics`; no `MjModel`, no mujoco import | builds on `models/` + `core/` |
 | `software/src/erp/robot/` | `base` (`ArmInterface`, `JointMap`), `dry_run` (`DryRunArm`), `mypalletizer` (`MyPalletizerArm`) — **command sink, never a measurement source** | may depend on `core/`; nothing in the estimation stack may import it |
 | `software/src/erp/trajectory.py` | `sine_sweep`, `resample` — the setpoint profile | numpy only |
-| `software/src/erp/sensors/` | `base` (`Sensor` ABC), `stream` (threaded base), `imu_serial` (`IMUDecoder`, `SerialIMUSensor`), `replay`, `sim`, `clock` (`ClockSync` — device→host, *not* `core.clock`), `mujoco` (`rows_of`, `make_R`). `calibration_from_samples` is **re-exported, not defined here** — it moved to `calibration/` at P6 | may depend on `core/` and `calibration/` |
+| `software/src/erp/sensors/` | `base` (`Sensor` ABC), `stream` (threaded base), `imu_serial` (`IMUDecoder`, `SerialIMUSensor`), `replay`, `sim`, `clock` (`ClockSync` — device→host, *not* `core.clock`), `mujoco` (`rows_of`, `make_R`), `live` (`LiveSimSensor`, a `Sensor` over a *running* plant — added with the teleop demo, not an ADR-0002 phase). `calibration_from_samples` is **re-exported, not defined here** — it moved to `calibration/` at P6 | may depend on `core/` and `calibration/` |
 | `software/src/erp/io/` | `log` (`MeasurementLog`), `paths` (`repo_root`, `resolve_repo_path`, `resolve_model_path`), `config` (P7 — `load_config`, `build_decoder`, the frozen config dataclasses, `ConfigError`). **English** | `core/` only for `log`/`paths`. `config` imports `sensors.IMUDecoder`, so it is deliberately **not** re-exported from `io/__init__.py` — `import erp.io` must stay core-only, because `fusion/` may import `erp.io` and may never reach `sensors/`. A subprocess test pins it |
 | `software/src/erp/fusion/` | `runner` — `FilterRunner` (timestamps → filter steps), `History`, `Estimator` protocol. **English**, beside `core/`/`io/`, not beside `estimators/`: it decides *when* the filter steps, never what it computes. Landed at P5; the old `FusionEngine` it replaces was deleted and shares no design with it | builds on `core/` + `models/`; **never** `sensors/`, `robot/` or a wall clock |
 | `software/src/erp/calibration/` | `rest` — `calibration_from_samples` (moved here from `sensors/imu_serial.py` at P6, still re-exported there), `rest_bias` (the offline counterpart of `SerialIMUSensor.calibrate`). **English** | `core/` + numpy **only**; `sensors/` imports this, never the reverse |
 | `software/src/erp/analysis/` | `lag` (`estimate_lag`), `site` (`propagate_to_site`), `consistency` (`ConsistencyReport`, `consistency_report`). Landed at P8. **Spanish** — forced: § 5.3 required moving the first two with their Spanish docstrings intact | `core/` + `sim/`; imports mujoco (via `h`/`H`), so a test that exercises it end to end carries the `mujoco` marker |
-| `software/src/erp/viz/` | `geometry` (`sigma_per_axis`, `ellipsoid_axes`, `principal_tilt_deg` — pure numpy), `theme`, `figures` (`three_way`, `sensor_compare`, `effector_band`). Landed at P8; the old "geometry only, no backend imports" rule was overturned by ADR-0002 § 4.2. **English** | matplotlib allowed, gated behind `[viz]`. `__init__.py` re-exports **only** `geometry` and nothing else -- not `strips`, `ghost` or `live` -- so `import erp.viz` stays numpy-only and CI (which installs `.[dev]`) can import it |
-| `software/tests/` | 340 tests. `conftest` (fake serial port + IMU layout), `test_sensor_contract` (one suite over all three `Sensor`s), `test_imu_serial`, `test_clock`, `test_replay_log`, `test_paths`, `test_plant`, `test_golden_run`, `test_robot`, `test_trajectory`, `test_core_clock`, `test_dynamics`, `test_ekf_linear`, `test_fusion_runner` (47, no mujoco — carries a verbatim copy of the old `run_imu_ekf` as a bit-identity oracle), `test_calibration` (11, 9 of them fast — same oracle trick against notebook cell 19's block), `test_config` (24, 21 of them fast — every malformed-config case paired with the good file it mutates), `test_analysis` (20 — verbatim oracles for the two moved functions, plus a broken variant per metric), `test_viz` (13 — the ellipse arithmetic runs always, the figures skip without `[viz]`), `test_live_sensor` (12, all fast — the live sampler's grid and latency), `test_viz_live` (12, 9 fast — the ring buffer always, the ghost geoms behind the `mujoco` marker) | — |
-| `scripts/` | `make_golden_run.py` — generates and re-checks the golden fixture. **Emptied at P8**: it now holds `run_pipeline`, `_metadata` and `main` and nothing else, i.e. configuration and a call. `demo_three_way.py` — the live three-way demo (plant truth vs noisy virtual sensor vs EKF estimate), P8's acceptance artifact. Both **Spanish** | not linted by CI |
+| `software/src/erp/viz/` | `geometry` (`sigma_per_axis`, `ellipsoid_axes`, `principal_tilt_deg` — pure numpy), `theme`, `figures` (`three_way`, `sensor_compare`, `effector_band`); and, from the teleop demo, `strips` (`RingBuffer`), `ghost` (`draw_ghost` — the fourth mujoco caller) and `live` (the pyqtgraph window, `[live]` extra). Landed at P8; the old "geometry only, no backend imports" rule was overturned by ADR-0002 § 4.2. **English** | matplotlib allowed, gated behind `[viz]`. `__init__.py` re-exports **only** `geometry` and nothing else -- not `strips`, `ghost` or `live` -- so `import erp.viz` stays numpy-only and CI (which installs `.[dev]`) can import it |
+| `software/tests/` | 344 tests. `conftest` (fake serial port + IMU layout), `test_sensor_contract` (one suite over all three `Sensor`s), `test_imu_serial`, `test_clock`, `test_replay_log`, `test_paths`, `test_plant` (10, incl. the scenery guards), `test_golden_run`, `test_robot`, `test_trajectory`, `test_core_clock`, `test_dynamics`, `test_ekf_linear`, `test_fusion_runner` (47, no mujoco — carries a verbatim copy of the old `run_imu_ekf` as a bit-identity oracle), `test_calibration` (11, 9 of them fast — same oracle trick against notebook cell 19's block), `test_config` (24, 21 of them fast — every malformed-config case paired with the good file it mutates), `test_analysis` (20 — verbatim oracles for the two moved functions, plus a broken variant per metric), `test_viz` (13 — the ellipse arithmetic runs always, the figures skip without `[viz]`), `test_live_sensor` (12, all fast — the live sampler's grid and latency), `test_viz_live` (14, 9 fast — the ring buffer always, the ghost geoms behind the `mujoco` marker; the ghost half uses `mjv_updateScene` as its oracle, never a hand-written `dataid`) | — |
+| `scripts/` | `make_golden_run.py` — generates and re-checks the golden fixture. **Emptied at P8**: it now holds `run_pipeline`, `_metadata` and `main` and nothing else, i.e. configuration and a call. `demo_three_way.py` — the live three-way demo (plant truth vs noisy virtual sensor vs EKF estimate), P8's acceptance artifact. `demo_teleop.py` — the interactive teleop demo, outside the roadmap; `efc8df7`'s render bugs were fixed on 2026-09-22 and `/goal` is its guide. All three **Spanish** | not linted by CI, and not type-checked either (`mypy software/src` does not reach them) |
 | `data/processed/` | `golden_ekf_run.npz` — the frozen run. Git-LFS | — |
+| `.claude/skills/goal/` | `SKILL.md` + `references/teleop.md` (verified MuJoCo/pyqtgraph mechanics and traps) + `references/invariants.md` (what a change must not break) — the guide to `scripts/demo_teleop.py`, invoked as `/goal`. The only project-local skill | — |
 | `notebooks/` | `mypalletizer260EKF.ipynb` — **the driver application**; `viewer.ipynb` (MuJoCo viewer + `SimLog`); `finger_imu_toolkit.ipynb` (finger EKF rebuilt on `erp`); `finger_imu_practice.ipynb`, `Palletizer.ipynb` (reference) | may import anything |
-| `mechanical/mujoco_assets/` | `MyPalletizer260/MyPalletizer260.xml` + STL meshes, `axis_xyz.xml` — the model everything runs on | — |
+| `mechanical/mujoco_assets/` | `<dir>/MyPalletizer260.xml` + STL meshes, `axis_xyz.xml`, `scene.xml` (sky + checkered ground + offscreen framebuffer, one `<include/>` — **no longer visual only**, the floor collides), and uncommitted: `prop_box.xml`, `prop_stair.xml` and the two wrapper models that include them. **Read the casing warning below before `git add`.** All the XML comments here are **Spanish** | — |
 | `config/` | `estimation.yaml` — the fitted IMU layout, axis maps, rates. **Read by `erp.io.config` since P7**, and now the definition rather than documentation; the notebook still mirrors the values by hand. The finger sections moved to ADR-0001 appendix A | — |
 | `data/raw/` | three short IMU logs (raw device columns, calibrated columns, and a layout-named variant) + `palletizer_traj.npz` | — |
 | `ros2_ws/src/erp_ros/`, `docs/hardware/`, `electronics/` | **empty** (`.gitkeep` only) | — |
 | `firmware/` | `potentiometer_logger/potentiometer_logger.ino` only — the Teensy IMU firmware is not in this repo | out of scope for Python changes |
 | `docs/theory/`, `docs/adr/` | derivations and decision records — both describe the finger stack | — |
+| `docs/demo_teleop.md` | the teleop demo's pipeline end to end: the two models, the scheduler, `LiveSimSensor`, the EKF's predict/update, `FilterRunner`, **`buffer_horizon`** and the ghost. **Spanish** — it documents `scripts/demo_teleop.py` and the `estimators/`/`sim/` side. Current, not historical | — |
 
 `software/src/erp/__init__.py` is empty by design — import from the
 subpackages. The `__all__` lists in `core`, `models`, `estimators`, `io`,
@@ -674,8 +727,11 @@ one now. `get_project_root` is kept as an alias.
 - **Language follows the module, not your preference.** English:
   `core/`, `io/`, `sensors/`, `robot/`, `fusion/`, `calibration/`,
   `trajectory.py`, all tests, and `docs/adr/`. Spanish: `sim/`,
-  `estimators/`, `models/`, the notebooks
-  and `docs/theory/`. The split is roughly hardware-and-plumbing versus
+  `estimators/`, `models/`, the notebooks, `docs/theory/` and
+  `docs/demo_teleop.md`. A document follows the thing it documents, not
+  the mix of packages it happens to mention: `docs/demo_teleop.md`
+  covers `fusion/` and `sensors/` at length and is still Spanish,
+  because its subject is a Spanish script. The split is roughly hardware-and-plumbing versus
   physics-and-filtering; new modules on the command path (`robot/`,
   `trajectory.py`) follow `sensors/` into English. Match the file you are
   editing, and if you add a package, say in this list which side it is on.
@@ -690,11 +746,12 @@ one now. `get_project_root` is kept as an alias.
   M1's acceptance test *is* the model, so it cannot be written without
   it. Tests needing mujoco **and** the Git-LFS assets carry
   `@pytest.mark.mujoco`; everything else stays in `pytest -m "not
-  mujoco"`, which runs in ~2.4 s. Default to the fast side — **258 of
-  311** tests are there, including the whole EKF-versus-Kalman
-  comparison. (This line read "~0.9 s" and "150 of 196" until
-  2026-09-22, four phases after it was last true — it is the counts in
-  the Commands block above that get re-measured, so trust those.)
+  mujoco"`, which runs in ~2.4 s. Default to the fast side — **284 of
+  344** tests are there, including the whole EKF-versus-Kalman
+  comparison. (Measured 2026-09-22. This line has now been stale twice —
+  it read "150 of 196", then "258 of 311" — so trust the Commands block
+  above, which is what gets re-measured, and re-run the two `pytest`
+  lines rather than quoting this one.)
 - **Inject the clock; do not read one.** Anything that waits or
   timestamps takes a `Clock` (`core/clock.py`) or a
   `Callable[[], float]`, so it can be driven by `VirtualClock` in a test.
@@ -726,19 +783,55 @@ one now. `get_project_root` is kept as an alias.
   Recent history does not follow this ("Refactor", "NA", "working on
   it") — follow the convention anyway.
 - Respect module ownership when suggesting reviewers — see `CODEOWNERS`
-  (handles are still placeholders; its `fusion/` entry points at a
-  package that is still empty, and it has no entry for `robot/`,
-  `trajectory.py` or `scripts/`).
+  (handles are still placeholders, and it has no entry for `core/`,
+  `sim/`, `analysis/`, `robot/`, `trajectory.py` or `scripts/`). Two of
+  its notes are now historical: the `fusion/` entry no longer points at
+  an empty package (P5 filled it), and its closing comment names
+  `estimators/base.py` as one of "the four ABCs", which `1987f00`
+  deleted — there are three, and `models/base.py` is a protocol, not an
+  ABC.
 
 ## Current repo state
 
 `git log --oneline -5` and `git status` are the authority; this section
 goes stale on its own. **The ADR-0002 work is now committed** — as of
-2026-09-22 the tip is `129834c`, P8 (`erp.analysis` + `erp.viz` + the
-three-way demo), on top of `d1c7c38`, `0b53942` (P7, `erp.io.config`),
-`60e2d07` (the golden-log restore) and `677540e` (`added calibration
-package`). Neither `587162f` nor `677540e` follows the
-conventional-commit rule this file states; follow the convention anyway.
+2026-09-22 the tip is `efc8df7` (`added demo_teleop but it still has a
+bug`), on top of `129834c`, P8 (`erp.analysis` + `erp.viz` + the
+three-way demo), `d1c7c38` (the `/goal` skill), `0b53942` (P7,
+`erp.io.config`), `60e2d07` (the golden-log restore) and `677540e`
+(`added calibration package`). Neither `587162f`, `677540e` nor
+`efc8df7` follows the conventional-commit rule this file states; follow
+the convention anyway.
+
+**`efc8df7`'s bug is found and fixed, uncommitted, on 2026-09-22.** It
+was two independent things wearing one symptom:
+
+1. **`viz/ghost.py` wrote `dataid = geom_dataid`.** The render context
+   holds **two** entries per mesh, so a scene geom's index is
+   `2 * geom_dataid` — that is what `mjv_updateScene` writes. Measured:
+   `geom_dataid` over the five mesh geoms `[0, 1, 2, 10, 18]` is
+   `[0, 1, 2, 3, 4]` and the renderer's own scene gives `[0, 2, 4, 6, 8]`.
+   The undoubled value draws a *different link's* mesh on every link but
+   the base, and since each mesh's compiled frame is ~120° off identity,
+   that reads as a rotation bug. `mat` was never wrong — the abandoned
+   `g.mat[:] = ...` edit was chasing the right symptom in the wrong field.
+2. **All six jog keys were also viewer shortcuts.** Every letter A–Z is
+   bound by `mjVISSTRING`/`mjRNDSTRING`, so no keymap escapes; what can
+   be chosen is which class. `W`/`S`/`G`/`R` were *render* flags living
+   on the internal `mjvScene`, which the passive `Handle` does not expose
+   — unreachable from Python — so jogging link1 turned on wireframe and
+   killed the shadows. The keymap moved to `Q/A`, `E/D`, `U/J` plus
+   `P`/`O`/`X`, all `mjvOption` flags, which the tick loop re-asserts
+   from a snapshot under `viewer.lock()`.
+
+**`test_viz_live.py` pinned the first one.** It asserted
+`dataid == geom_dataid`, which proved the field had been *set* and never
+that it was set to what the renderer reads — a test that could not fail
+in the direction that mattered. It now uses `mjv_updateScene` as the
+oracle and carries the falsification (verified: the old value gives
+`[0, 1, 2, 3, 4]` against the renderer's `[0, 2, 4, 6, 8]`, so the test
+fails on the old code and passes on the new). Prefer that shape whenever
+you assert against a MuJoCo-owned convention: let MuJoCo state it.
 
 The 2026-09-21 hardware run (`data/raw/imu_trajectory_raw.csv`,
 `data/raw/palletizer_traj.npz`, `notebooks/mypalletizer260EKF.ipynb`)
@@ -758,10 +851,102 @@ three-way demo (`scripts/demo_three_way.py`), the **interactive teleop
 demo** (`scripts/demo_teleop.py` — keyboard jogging, the estimate drawn
 as a ghost over the plant, live pyqtgraph strips), and the palletizer
 notebook end to end (trajectory → real arm + MuJoCo replay → IMU log →
-EKF → end-effector covariance). 340 tests collected; **339 pass, 1
-skipped**, `ruff` and `mypy --strict` (48 files) are clean, `pytest -m
-"not mujoco"` is green (284 passed, 1 skipped, 55 deselected), and
+EKF → end-effector covariance). 344 tests collected; on the working tree
+**342 pass, 1 fails, 1 skipped** (re-measured 2026-09-23 — the failure is
+the scenery/collider disagreement described below, not a regression in any
+of the above). `ruff` and `mypy --strict` (48 files) are clean, `pytest -m
+"not mujoco"` is green (284 passed, 1 skipped, 59 deselected), and
 `make_golden_run.py --check` reproduces the fixture at `rtol=1e-12`.
+
+### The half-landed collision work (uncommitted, 2026-09-23)
+
+A workstream **after** the `efc8df7` bugfix that gives the arm contact:
+an `ee_collider` on `act`, a solid floor, and two optional props. It is
+real and mostly good, but it is **not finished**, and the three loose
+ends below are each the kind that looks like something else when you hit
+it cold.
+
+- **It is red, and the two halves disagree.** `scene.xml` makes the
+  floor collide on purpose; the same batch's new
+  `test_the_scenery_is_index_safe` asserts `geom_contype[floor] == 0`
+  under a comment reading "Visual only: no state, no sensor channels, no
+  contacts." Both were written deliberately, so **decide which one is
+  right rather than silencing the test**: if the floor should be solid,
+  the assertion is stale and the comment with it; if the golden run's
+  inertness is the invariant being defended, note that
+  `test_the_scenery_does_not_move_the_physics` already defends exactly
+  that, still passes, and is the stronger of the two.
+- ~~**`--prop` does not exist.**~~ **Wired on 2026-09-23.**
+  `scripts/demo_teleop.py` now has `--prop {none,box,stair}`, default
+  `none`, backed by a `PROP_MODELS` dict; `argparse` enforces one prop at
+  a time. The load path is deliberately **two files, not one**:
+  `Teleop.__init__` gained a `blind_xml` parameter (defaulting to
+  `xml_path`, so old callers are unchanged), the plant compiles from the
+  wrapper and the blind model **always** from `XML_RELATIVE`. That split
+  is the whole point — compiling the blind model from the wrapper would
+  put the prop inside the filter, a bump would stop being unmodelled
+  dynamics, and the demo would keep running while no longer showing what
+  it claims. Verified per choice: blind `ngeom` stays 28 while the plant
+  goes 28 → 29 → 31.
+
+  Checked before wiring, because it would have been silent breakage: a
+  wrapper does not move anything the script indexes. With either prop
+  `nsensordata` stays 15, the IMU rows are the same 12, `ctrlrange` is
+  unchanged and the five meshes keep their `geom_dataid` — the prop's
+  geoms append at the end.
+
+- **The staircase was occluding itself, and is fixed.** Worth keeping
+  because the failure was invisible from the XML. The original steps
+  climbed *away* from the base (0.030/0.060/0.090 m at radial
+  0.125/0.160/0.195), and across 1001 setpoints **only `stair_3` was
+  ever touched** — the other two missed by **24.77 mm** and **2.44 mm**.
+  Not a reach problem: all three sit inside the envelope, and with the
+  floor removed the tool tip drops to z = −0.072 m inside any of their
+  footprints. It is occlusion — the tall outer step intercepts the tool
+  before it can descend on the short inner ones. The falsification that
+  proves it: delete `stair_3`, re-sweep, and `stair_2` goes from 0 to
+  **6282** contacts. A second and independent defect: the treads were
+  35 mm deep against a **36 mm** tool diameter, so the cylinder could
+  never seat on one without fouling its neighbour.
+
+  Both are fixed by one change — a single radius (0.160 m) with the
+  steps spread in **azimuth** instead of depth, on a 60 mm square
+  footprint. `rot` is the spare degree of freedom that reaches them.
+  Measured after: **3122 / 3636 / 4296** contacts on `stair_1/2/3`,
+  `ncon = 0` at the keyframe, and the eligible-pair set unchanged. Driven
+  through the demo over a three-step tour, NIS median moves only
+  5.42 → 5.69 while the **max goes 30.1 → 156.9** — the filter is fine
+  except at the moments of contact, which is the signature to expect from
+  unmodelled dynamics and the reason the staircase earns its place over
+  the box.
+- **The directory was renamed to `Mypalletizer260` and git has not
+  noticed.** This is the one that will cost a CI run. `git ls-files`
+  still lists the tracked arm XML and every mesh under
+  `mechanical/mujoco_assets/MyPalletizer260/` — capital `P` — while the
+  untracked wrappers show up under `Mypalletizer260/`, lowercase `p`.
+  `core.ignorecase` is `true` here, so Windows sees one directory and
+  the split is invisible; **CI is ubuntu**, where they are two, and the
+  wrappers' `<include file="MyPalletizer260.xml"/>` resolves into a
+  directory holding no arm and no meshes. Committing as-is is what
+  breaks it. Fix the casing before `git add` — `git mv` the tracked
+  paths deliberately, or rename the new files to match what git already
+  tracks. Note `demo_teleop.py`'s `XML_RELATIVE` spells it with the
+  capital `P`, i.e. it agrees with git and not with the disk.
+
+What the work does **not** break, all re-verified 2026-09-23: the golden
+fixture (`--check` green at `rtol=1e-12`), `ruff`, `mypy --strict`, and
+`pytest -m "not mujoco"`. The contact geometry is deliberately kept out
+of the filter's model — `blind_variant` still compiles the bare
+`MyPalletizer260.xml`, so a prop is **unmodelled dynamics** and a bump
+is supposed to spike the NIS. That is the demo working, not failing, and
+it is the reason the props live in wrapper models instead of in the arm.
+
+One smaller inconsistency inside the same batch: `viz/ghost.py`'s
+docstring says "25 of 27 geoms on this model" and "27 geoms of which 5
+are meshes, the other 22". Measured after the collider landed:
+`ghost_geom_ids` returns **26 of 28**. The *rule* it states — skip
+anything with `body_weldid == 0` — is right and is written against the
+model rather than a name list, so only the counts are stale.
 
 **The teleop demo is not an ADR-0002 phase.** It was built on 2026-09-22
 outside the roadmap, on top of P8, and it neither closes nor advances a
@@ -769,6 +954,29 @@ milestone — M1's open numeric question is unchanged by it. What it adds
 to the package is `erp.sensors.LiveSimSensor` (a `Sensor` over a
 *running* plant, which `SimSensor` structurally cannot be),
 `erp.viz.strips.RingBuffer`, `erp.viz.ghost` and `erp.viz.live`.
+
+**Its "working" was qualified until 2026-09-22** — see the two bugs
+under "Current repo state" above. Its *packaged* parts are covered by
+tests (`test_live_sensor.py`, `test_viz_live.py` — 25 cases, 21 fast);
+the assembled loop still has none, because it opens a window. What it
+has instead is a startup assertion: `_check_ghost_starts_on_the_arm`
+fails the run if plant and ghost do not begin in the same pose. Measured
+separation **8.1e-08 m** — they always did, which is how the ghost's
+*pose* was cleared as a cause and the *mesh* found as the real one. Note
+what that check does not cover: a wrong `dataid` leaves poses untouched.
+
+The measured teleop numbers quoted further up (NIS 5.70 healthy, the
+41-of-58 tie-breaking drop, the live session's 19 933/743/0) were
+recorded before either bug was known. They are still evidence about the
+horizon arithmetic, which is package code and untouched by this fix —
+neither bug could move a NIS, since both are render-side.
+
+**`.claude/skills/goal/` is the guide to this demo, and it is not
+optional reading if you touch it.** `d1c7c38` added it: `SKILL.md` plus
+`references/teleop.md` (the verified MuJoCo/pyqtgraph API mechanics and
+the traps, 198 lines) and `references/invariants.md` (what a change there
+must not break, 316 lines). Invoke it as `/goal`. It is the only
+project-local skill.
 
 **ADR-0002 phases P0 through P8 are done — every phase except P7.5.** Read
 `docs/adr/0002-notebook-to-package.md` before starting any of the rest:

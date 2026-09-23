@@ -1,0 +1,6 @@
+<!-- El brazo mas la escalera. Uno de los tres modelos de PLANTA de la demo.
+     El por que de este archivo esta explicado en MyPalletizer260_box.xml. -->
+<mujoco model="palletizer_stair">
+  <include file="MyPalletizer260.xml"/>
+  <include file="../prop_stair.xml"/>
+</mujoco>

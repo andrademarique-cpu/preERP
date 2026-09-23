@@ -1,0 +1,21 @@
+<!-- El brazo mas la caja. Uno de los tres modelos de PLANTA de la demo.
+
+     `<include>` es estatico: no hay forma de elegir un prop con un atributo, asi
+     que "un prop por vez" se implementa como "un archivo por prop". De ahi este
+     envoltorio y su hermano MyPalletizer260_stair.xml.
+
+        --prop none    -> MyPalletizer260.xml        (el brazo pelado, default)
+        --prop box     -> este archivo
+        --prop stair   -> MyPalletizer260_stair.xml
+
+     SOLO LO CARGA LA PLANTA. `erp.sim.plant.blind_variant` sigue compilando
+     MyPalletizer260.xml, asi que el modelo del EKF no tiene la caja adentro y un
+     golpe le llega como dinamica no modelada.
+
+     El `ee_collider` NO esta aca: vive en <body name="act"> dentro del XML del
+     brazo, y un envoltorio no puede meter mano adentro de un body incluido. Ahi
+     es inofensivo -- en el modelo del filtro no hay con que chocar. -->
+<mujoco model="palletizer_box">
+  <include file="MyPalletizer260.xml"/>
+  <include file="../prop_box.xml"/>
+</mujoco>

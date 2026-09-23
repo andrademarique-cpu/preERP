@@ -73,20 +73,37 @@
                                 <geom class="axis_y" /> <geom class="axis_y_tip" />
                                 <geom class="axis_z" /> <geom class="axis_z_tip" />
                             </frame>
+                            <!-- Colisionador del efector. EL UNICO geom del brazo que
+                                 colisiona: contype=2 / conaffinity=1 contra el 1/2 del
+                                 entorno. Todo el resto del arbol hereda contype=0
+                                 conaffinity=0 del <default> de arriba, asi que el brazo
+                                 no choca ni consigo mismo ni con el entorno -- eso ya
+                                 estaba y no hubo que tocarlo.
+
+                                 mass="0", y `act` ya trae un <inertial> explicito que
+                                 pisa la inercia derivada de los geoms: verificado bit a
+                                 bit que masa e inercia del body no se mueven.
+
+                                 fromto va en el marco de `act`: arranca en el sitio
+                                 `efector` (0 0.003 -0.05) y cuelga 35 mm hacia -z, que
+                                 en el mundo es hacia abajo (el eje z local del sitio
+                                 mira a +z del mundo). Medidas a ojo, para afinar.
+
+                                 VA DESPUES del <frame>: adelante correria los ids de
+                                 los geoms de la triada. Las mallas quedan en
+                                 [0, 1, 2, 10, 18] igual, que es lo que `erp.viz.ghost`
+                                 resuelve por geom_dataid. -->
+                            <geom name="ee_collider" type="cylinder"
+                                  fromto="0 0.003 -0.05  0 0.003 -0.085" size="0.018"
+                                  mass="0" contype="2" conaffinity="1"
+                                  rgba="0.95 0.35 0.10 0.55" group="3" />
                         </body>
                     </body>
                 </body>
             </body>
         </body>
     </worldbody>
-    <!-- El kv de los servos NO va en el actuador: va como `damping` del joint
-         (rot 0.477, link1 3.342, link2 0.955). Con el integrador Euler por
-         defecto, el kv del actuador se integra EXPLICITO y a timestep 2 ms la
-         sim oscila a 250 Hz (Nyquist) al arrancar -- las "bandas dobles" del
-         log de sensores. El damping del joint Euler lo integra IMPLICITO:
-         misma fuerza -kv*qdot, resultado identico a integrator="implicitfast",
-         sin cambiar el integrador. Unica diferencia: el damping del joint no
-         cuenta para forcerange (hoy los servos no pasan del 10%). -->
+    
     <actuator>
         <position name="rot_servo"   joint="rot"   kp="10"  forcerange="-4.0 4.0" ctrlrange="-2.79 2.79"/>
         <position name="link1_servo" joint="link1" kp="80" forcerange="-7.0 7.0" ctrlrange="0 1.57"/>
@@ -119,4 +136,15 @@
         <key name="home" qpos="0 0 0 1.5693" qvel="0 0 0 0" ctrl="0 0 0" />
     </keyframe>
 
+    <!-- Cielo y piso. Va ULTIMO a proposito: el escenario trae un
+         <body name="scenery"> y el orden de los cuerpos decide la numeracion de
+         los geoms, asi que puesto aca el piso queda con el ultimo id y no
+         corre ninguno de los del brazo. El detalle esta explicado en
+         ../scene.xml y lo afirma test_plant.py.
+
+         El cielo es decorado; el PISO NO. Lleva contype/conaffinity para que el
+         `ee_collider` apoye en vez de hundirse. El resto del brazo lo atraviesa
+         igual que antes. Verificado que la corrida dorada no lo toca: sus 1848
+         estados estimados dan ncon = 0. -->
+    <include file="../scene.xml"/>
 </mujoco>

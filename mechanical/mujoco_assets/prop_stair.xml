@@ -1,0 +1,70 @@
+<!-- Prop: una escalera de tres peldanos. UNO de los objetos opcionales del
+     entorno, alternativo a prop_box.xml -- se carga uno por vez.
+
+     NO lo incluye MyPalletizer260.xml. Lo incluye solo el modelo envoltorio
+     Mypalletizer260/MyPalletizer260_stair.xml, que es lo que carga la demo con
+     `--prop stair`. Con `--prop none` (el default) no se carga ninguno.
+
+     Las razones de fondo -- por que va aparte del XML del brazo, por que
+     contype=1/conaffinity=2, por que estatico y sin juntas, y por que adentro de
+     un <body> -- estan escritas una sola vez en prop_box.xml. Valen igual aca.
+
+     ====================================================================
+     POR QUE LOS PELDANOS ESTAN EN ABANICO Y NO EN ESCALERA RADIAL
+     ====================================================================
+
+     La primera version los ponia uno detras del otro sobre +y, subiendo a
+     medida que se alejaban: 0.030 / 0.060 / 0.090 m de alto a radial
+     0.125 / 0.160 / 0.195 m. Se veia bien y NO FUNCIONABA. Medido sobre esa
+     geometria, barriendo las tres consignas y mirando contra que choca el
+     `ee_collider`:
+
+         peldano   acercamiento maximo     resultado
+         stair_1        +24.77 mm          nunca lo toca
+         stair_2         +2.44 mm          nunca lo toca
+         stair_3         -0.97 mm          contacto
+
+     En 1001 consignas SOLO el tercero hacia contacto. No es falta de alcance:
+     los tres caen dentro de la envolvente, y con el piso sacado la punta baja
+     hasta z = -0.072 m dentro de la huella de cualquiera de ellos. Es OCLUSION.
+     El peldano alto y externo se lleva por delante a la herramienta antes de
+     que pueda bajar sobre los cortos de adentro, porque la escalera SUBE
+     alejandose del brazo y el brazo llega desde arriba y desde afuera.
+
+     La falsacion, que es lo que lo deja probado: borrando `stair_3` del mismo
+     modelo y repitiendo el barrido, `stair_2` pasa de 0 a 6282 contactos.
+
+     Habia un segundo problema, independiente: los peldanos tenian 35 mm de
+     fondo y el cilindro del efector tiene 36 mm de DIAMETRO. Un util mas ancho
+     que el escalon no puede apoyar en uno sin pisar el de al lado.
+
+     Los dos se arreglan con lo mismo: un solo radio (0.160 m, comodo dentro del
+     alcance de 0.2174 m) y separacion en AZIMUT, con huella cuadrada de 60 mm
+     contra los 36 mm del util. Asi ningun peldano tapa a otro -- se llega a
+     cada uno girando `rot`, que es el grado de libertad que sobraba -- y el
+     cilindro apoya entero. Medido sobre esta geometria: 3122 / 3636 / 4296
+     contactos sobre stair_1 / stair_2 / stair_3, y ncon = 0 en el keyframe.
+
+     Lo que la escalera sigue sirviendo, y la caja no: el contacto pasa a TRES
+     alturas distintas, asi que se ve si el filtro se recupera igual de bien en
+     las tres. Esa era la intencion original y recien ahora se cumple.
+
+     El `euler` no es decorativo: con una rotacion -azimut alrededor de z, el +y
+     local del peldano queda apuntando radialmente hacia afuera, o sea que los
+     tres presentan la misma cara al brazo. Con huella cuadrada el contacto casi
+     no lo nota; lo que se nota es al mirarlo. -->
+<mujoco model="prop_stair">
+  <worldbody>
+    <body name="stair">
+      <geom name="stair_1" type="box" pos="-0.0903 0.1321 0.015"
+            size="0.030 0.030 0.015" euler="0 0 0.60"
+            mass="0" contype="1" conaffinity="2" rgba="0.55 0.58 0.62 1"/>
+      <geom name="stair_2" type="box" pos="0.0000 0.1600 0.030"
+            size="0.030 0.030 0.030" euler="0 0 0"
+            mass="0" contype="1" conaffinity="2" rgba="0.50 0.53 0.57 1"/>
+      <geom name="stair_3" type="box" pos="0.0903 0.1321 0.045"
+            size="0.030 0.030 0.045" euler="0 0 -0.60"
+            mass="0" contype="1" conaffinity="2" rgba="0.45 0.48 0.52 1"/>
+    </body>
+  </worldbody>
+</mujoco>

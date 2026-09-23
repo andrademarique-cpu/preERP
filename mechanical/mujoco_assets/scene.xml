@@ -1,0 +1,93 @@
+<!-- Escenario: cielo y piso.
+
+     OJO: el piso YA NO ES SOLO VISUAL. Antes este archivo decia "solo visual, no
+     toca la fisica" y era cierto; desde que el piso lleva contype/conaffinity, el
+     colisionador del efector (`ee_collider`, en MyPalletizer260.xml) APOYA sobre
+     el. El resto del brazo lo sigue atravesando, porque hereda contype=0
+     conaffinity=0. El cielo, la textura y el framebuffer si siguen siendo
+     decorado puro.
+
+     Por que se volvio solido: el espacio alcanzable del efector baja hasta
+     z = -0.038 m, o sea por debajo del plano del piso, y sin colision la
+     herramienta se hundia en el suelo.
+
+     Se incluye desde MyPalletizer260.xml con <include file="../scene.xml"/>
+     como ULTIMO hijo de <mujoco>, igual que axis_xyz.xml se incluye dentro de
+     <default>. Separado en su propio archivo para que el XML del brazo cambie
+     una linea y nada mas.
+
+     POR QUE EL PISO VA ADENTRO DE <body name="scenery"> Y NO SUELTO EN
+     <worldbody>. Esto es lo unico realmente delicado del archivo. MuJoCo numera
+     los geoms por CUERPO, y el mundo es siempre el cuerpo 0: un geom colgado
+     directo del <worldbody> se lleva el id 0 y corre todos los del brazo un
+     lugar para arriba, sin importar en que parte del texto este escrito
+     (comprobado: declarandolo ultimo igual sale primero). Metido en su propio
+     cuerpo estatico, que se crea DESPUES del brazo, se lleva el ultimo id de
+     cuerpo y sus geoms los ultimos ids de geom.
+
+     Medido sobre este modelo, con y sin escenario:
+       geoms de malla   [0, 1, 2, 10, 18]  ->  [0, 1, 2, 10, 18]   sin cambios
+       geom_dataid      [0, 1, 2, 3, 4]    ->  [0, 1, 2, 3, 4]     sin cambios
+       ngeom / nbody    26 / 6             ->  27 / 7  (el piso es el geom 26)
+       nq nv na nsensordata                ->  identicos
+       1848 pasos con consigna fija: max |sensordata| = 0.000e+00
+
+     Ese ultimo numero es el que importa: 1848 pasos es el largo de la corrida
+     dorada, asi que el escenario no mueve al filtro ni un digito. Si alguien
+     saca el piso de este cuerpo, la aritmetica sigue igual pero se renumeran
+     los geoms, y lo que se rompe es el fantasma (`erp.viz.ghost` usa
+     `geom_dataid` para elegir la malla). `test_plant.py` lo afirma.
+
+     El piso NO necesita contype/conaffinity: el <default> del brazo ya los pone
+     en 0 y se heredan, asi que no colisiona con nada.
+-->
+<mujoco model="scene">
+  <visual>
+    <!-- El framebuffer fuera de pantalla arranca en 640x480, y `mujoco.Renderer`
+         se niega a dar una imagen mas grande que eso. Subirlo es lo que permite
+         sacar capturas y video de la demo a una resolucion que se pueda mirar.
+         No toca el visor interactivo, que dibuja en la ventana. -->
+    <global offwidth="1280" offheight="720"/>
+    <!-- Luz plana, a proposito: ninguna direccional y ninguna sombra. El
+         fantasma del EKF es translucido (alpha 0.35) y una sombra del brazo
+         moviendose sobre el piso cuadriculado es una segunda silueta oscura
+         para leer justo al lado de la que interesa. -->
+    <headlight ambient="0.35 0.35 0.38" diffuse="0.45 0.45 0.45" specular="0 0 0"/>
+    <!-- La bruma difumina el piso infinito contra el cielo en la distancia, en
+         vez de cortarlo con una linea dura en el horizonte. Mismo color que el
+         extremo claro del degrade de abajo. -->
+    <rgba haze="0.80 0.88 0.95 1"/>
+  </visual>
+
+  <asset>
+    <!-- Cielo: degrade de azul en el cenit a casi blanco en el horizonte. -->
+    <texture type="skybox" builtin="gradient"
+             rgb1="0.25 0.45 0.75" rgb2="0.80 0.88 0.95" width="512" height="3072"/>
+    <!-- Piso: damero de dos grises. Con texuniform="true" el texrepeat se cuenta
+         por metro y el lado del cuadrado sale 1 / texrepeat, o sea 8.3 cm acá,
+         contra un brazo de unos 30 cm. MEDIDO, no deducido: la cuenta "obvia"
+         es 1 / (2 * texrepeat) porque el builtin "checker" es un patron de 2x2,
+         y da la mitad de lo que realmente se ve. Renderizar desde arriba a una
+         altura conocida y contar los cuadrados toma un minuto y evita el error.
+         Subir el numero para cuadros mas chicos; arriba de ~20 (5 cm) el piso
+         empieza a tornasolar en la distancia y le compite al fantasma. -->
+    <texture name="grid" type="2d" builtin="checker"
+             rgb1="0.42 0.44 0.47" rgb2="0.70 0.72 0.75" width="512" height="512"/>
+    <material name="grid" texture="grid" texrepeat="12 12" texuniform="true" reflectance="0.05"/>
+  </asset>
+
+  <worldbody>
+    <body name="scenery">
+      <!-- z = 0 y no -ground_offset. El vertice mas bajo del brazo en el
+           keyframe `home` esta exactamente en 0.00000, asi que la base apoya al
+           ras. El <custom> del brazo trae `ground_offset = 0.06052`, que no se
+           usa aca: nada en el Python lo lee y un piso ahi abajo dejaria al
+           brazo flotando 6 cm. -->
+      <!-- contype=1 / conaffinity=2: la misma clase que los props de
+           prop_box.xml y prop_stair.xml. Con el 2/1 del `ee_collider` da
+           contacto; con el 0/0 del resto del brazo, no. -->
+      <geom name="floor" type="plane" size="0 0 0.05" pos="0 0 0" material="grid"
+            contype="1" conaffinity="2"/>
+    </body>
+  </worldbody>
+</mujoco>

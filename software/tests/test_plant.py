@@ -171,3 +171,95 @@ def test_skipping_the_warmup_misses_gravity_by_more_than_5g(blind) -> None:
     acc_x = float(h[layout["link2_acc"]][0])
     assert acc_x == pytest.approx(4.144, abs=0.01)
     assert abs(acc_x - 9.81) > 5.0, "the whole reason x0 is an equilibrium, not a pose"
+
+
+# ------------------------------------------------------------------ scenery
+
+
+def test_the_scenery_is_index_safe(plant, blind) -> None:
+    """`scene.xml` must add the ground without renumbering anything.
+
+    MuJoCo numbers geoms by BODY and the world is always body 0, so a floor hung
+    straight off `<worldbody>` takes geom id 0 and shifts every geom of the arm
+    up by one -- no matter where in the file it is written. That would move the
+    mesh ids `erp.viz.ghost` looks up through `geom_dataid`, which is how a
+    purely decorative change breaks the estimate's overlay.
+
+    `scene.xml` avoids it by putting the floor inside its own static
+    `<body name="scenery">`, created after the arm, so it collects the last body
+    id and the last geom ids. This is the guard: move the include, or lift the
+    geom out of that body, and the numbers below move while everything else
+    still passes.
+    """
+    import mujoco as mj
+
+    model, _ = plant
+    model_blind, _ = blind
+
+    floor = mj.mj_name2id(model, mj.mjtObj.mjOBJ_GEOM, "floor")
+    assert floor != -1, "scene.xml should be included by the arm XML"
+
+    # The property that matters is that the arm's geoms come FIRST and keep a
+    # contiguous block starting at 0 -- not that the floor happens to be last.
+    # Asserting `floor == ngeom - 1` would have been tighter and wrong: it fails
+    # the first time someone adds a second decor body, which is a supported
+    # thing to do and breaks nothing.
+    def body_of(i: int) -> str:
+        return str(mj.mj_id2name(model, mj.mjtObj.mjOBJ_BODY, int(model.geom_bodyid[i])))
+
+    arm = {"base_link", "rot", "link1", "link2", "act"}
+    arm_geoms = [i for i in range(model.ngeom) if body_of(i) in arm]
+    assert arm_geoms == list(range(len(arm_geoms))), "the arm's geoms must start at 0"
+    assert floor > max(arm_geoms), "the scenery must come AFTER the arm, never before"
+
+    # The arm's own geoms, unmoved. These indices are quoted in ghost.py and in
+    # the /goal skill's notes, and `geom_dataid` is what picks the mesh.
+    mesh = int(mj.mjtGeom.mjGEOM_MESH)
+    mesh_idx = [i for i in range(model.ngeom) if int(model.geom_type[i]) == mesh]
+    assert mesh_idx == [0, 1, 2, 10, 18]
+    assert [int(model.geom_dataid[i]) for i in mesh_idx] == [0, 1, 2, 3, 4]
+
+    # Visual only: no state, no sensor channels, no contacts.
+    assert (model.nq, model.nv, model.na) == (4, 4, 0)
+    assert model.nsensordata == 15
+    assert int(model.geom_contype[floor]) == 0
+    assert int(model.geom_conaffinity[floor]) == 0
+
+    # The blind variant is compiled from the same XML through MjSpec, and it is
+    # the model the ghost is drawn from, so it has to agree.
+    assert model_blind.ngeom == model.ngeom
+    blind_mesh = [i for i in range(model_blind.ngeom) if int(model_blind.geom_type[i]) == mesh]
+    assert blind_mesh == mesh_idx
+
+
+def test_the_scenery_does_not_move_the_physics(xml_path) -> None:
+    """Stepping with the ground present must match stepping without it, exactly.
+
+    The falsification for "purely visual". The scenery body is deleted from a
+    second spec and the two are stepped side by side for the golden run's own
+    length; anything but an exact zero means the frozen fixture is at risk and
+    `make_golden_run.py --check` is the next thing to run.
+    """
+    import mujoco as mj
+
+    with_scenery, _ = load_model(xml_path)
+    data = mj.MjData(with_scenery)
+
+    spec = mj.MjSpec.from_file(str(xml_path))
+    spec.delete(spec.body("scenery"))
+    bare = spec.compile()
+    bare_data = mj.MjData(bare)
+    assert bare.ngeom == with_scenery.ngeom - 1, "the scenery body was not removed"
+
+    for m, d in ((with_scenery, data), (bare, bare_data)):
+        mj.mj_resetDataKeyframe(m, d, m.key("home").id)
+
+    cmd = np.array([0.4, 0.5, 0.3])
+    worst = 0.0
+    for _ in range(1848):        # the golden run's length
+        data.ctrl[:3] = cmd
+        bare_data.ctrl[:3] = cmd
+        mj.mj_step(with_scenery, data)
+        mj.mj_step(bare, bare_data)
+        worst = max(worst, float(np.abs(data.sensordata - bare_data.sensordata).max()))
+    assert worst == 0.0, f"the scenery moved the physics by {worst:.3e}"

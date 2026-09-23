@@ -4,6 +4,8 @@
     python scripts/demo_teleop.py --degrade swap          # el fantasma se despega
     python scripts/demo_teleop.py --degrade overconfident
     python scripts/demo_teleop.py --no-plots              # solo el visor
+    python scripts/demo_teleop.py --prop box              # una caja que golpear
+    python scripts/demo_teleop.py --prop stair            # una escalera de 3 peldanos
 
 LA TESIS. El EKF es ciego a la consigna **por construccion**: `EKF` no tiene
 donde meter una `u`, y un test lo afirma por firma. Nunca ve la tecla que
@@ -62,7 +64,30 @@ from erp.sim.dynamics import MujocoDynamics
 from erp.sim.mujoco import h_dyn, make_Q, state_dim
 from erp.sim.plant import blind_variant, load_model, warmup_to_rest
 
+# El brazo pelado. Es SIEMPRE el modelo del FILTRO, lleve prop la planta o no.
 XML_RELATIVE = Path("mechanical/mujoco_assets/MyPalletizer260/MyPalletizer260.xml")
+
+# `--prop` -> modelo de PLANTA. `<include>` es estatico: no hay forma de elegir
+# un prop con un atributo, asi que "un prop por vez" se implementa como "un
+# archivo por prop", y estos envoltorios no son mas que el brazo mas un
+# <include>. De ahi que `none` apunte al XML del brazo y no a un envoltorio
+# vacio: no cargar ningun prop es exactamente la escena de antes.
+#
+# EL FILTRO NO LOS VE, y esa es la razon de que existan. `Teleop` compila
+# `blind_variant` desde XML_RELATIVE y nunca desde el envoltorio, asi que el
+# modelo ciego no tiene la caja adentro: un golpe le llega como DINAMICA NO
+# MODELADA y el NIS pega un salto. Eso es la demo funcionando, no fallando.
+#
+# VERIFICADO que el envoltorio no corre nada de lo que el resto del script
+# indexa -- con caja y con escalera `nsensordata` sigue en 15, las filas de las
+# IMUs son las mismas 12, `ctrlrange` no se mueve y las cinco mallas conservan
+# su `geom_dataid`, que es lo que el fantasma resuelve. Los geoms del prop se
+# agregan AL FINAL, que es por lo que nada de eso se corre.
+PROP_MODELS = {
+    "none": XML_RELATIVE,
+    "box": XML_RELATIVE.with_name("MyPalletizer260_box.xml"),
+    "stair": XML_RELATIVE.with_name("MyPalletizer260_stair.xml"),
+}
 
 # Identicos a los de `make_golden_run.py` y `demo_three_way.py`: las tres corridas
 # tienen que ser comparables, y tres juegos de constantes serian tres experimentos.
@@ -81,15 +106,46 @@ DEGRADATIONS = ("none", "swap", "overconfident", "zeros")
 # Teclas -> (indice de actuador, signo). `key_callback` recibe un codigo GLFW,
 # que para letras es ord(MAYUSCULA). Las teclas solo llegan a la ventana que
 # tiene el foco, o sea la del visor de MuJoCo, no la de los graficos.
+#
+# LAS 26 LETRAS YA ESTAN TOMADAS por el visor. `mjVISSTRING` y `mjRNDSTRING`
+# le asignan un atajo a cada bandera de visualizacion y no queda ni una libre,
+# asi que no existe un juego de teclas que el visor ignore. Lo que si se puede
+# elegir es CUAL colision, y hay dos clases muy distintas:
+#
+#   banderas de mjvOption  (Q camara, A auto connect, E igualdad, D cuerpo
+#                           estatico, U actuador, J junta, O objeto de perturb.,
+#                           P contacto partido, X textura, ...)
+#       viven en `viewer.opt`, que el handle pasivo SI expone -> se pueden
+#       volver a poner en su lugar en cada tick y el toggle no dura ni un cuadro.
+#
+#   banderas de render     (W wireframe, S sombra, R reflejo, G niebla,
+#                           K skybox, L aditivo)
+#       viven en la `mjvScene` interna, que el handle NO expone (tiene cam, opt,
+#       perturb, user_scn, m, d y nada mas) -> desde Python no hay forma de
+#       deshacerlas.
+#
+# El mapa de abajo usa SOLO teclas de la primera clase. Antes usaba W/S para
+# link1 y G/R para fantasma/reposo, o sea que mover una junta apagaba las
+# sombras y prendia el wireframe, y eso se lee como un problema de render del
+# fantasma cuando es el visor haciendo su trabajo.
 KEYMAP = {
     ord("Q"): (0, +1.0), ord("A"): (0, -1.0),
-    ord("W"): (1, +1.0), ord("S"): (1, -1.0),
-    ord("E"): (2, +1.0), ord("D"): (2, -1.0),
+    ord("E"): (1, +1.0), ord("D"): (1, -1.0),
+    ord("U"): (2, +1.0), ord("J"): (2, -1.0),
 }
+KEY_GHOST = ord("P")
+KEY_HOME = ord("O")
+KEY_STOP = ord("X")
 AYUDA = """
-  Q / A   rot_servo    -/+        G     fantasma on/off
-  W / S   link1_servo  -/+        R     volver al reposo
-  E / D   link2_servo  -/+        ESC   salir  (o cerra el visor)
+  Q / A   rot_servo    +/-        P     fantasma on/off
+  E / D   link1_servo  +/-        O     volver al reposo
+  U / J   link2_servo  +/-        X     frenar el movimiento
+                                  ESC   salir  (o cerra el visor)
+
+  Las teclas QUEDAN TRABADAS: una vez que apretas, la junta sigue yendo hasta
+  el limite de su rango. `key_callback` avisa cuando se APRIETA una tecla y
+  nunca cuando se suelta, asi que no hay forma de detectar que soltaste -- por
+  eso hace falta la X. La tecla opuesta tambien invierte.
 
   La 4a junta (`act`) esta acoplada por tendon, rango [0, 0]: sigue, no se
   comanda. Las teclas van a la ventana del VISOR, no a la de los graficos.
@@ -126,14 +182,23 @@ class Teleop:
     futuro por la diferencia entre las dos bases, que es constante y silenciosa.
     """
 
-    def __init__(self, xml_path: Path, degrade: str) -> None:
+    def __init__(
+        self, xml_path: Path, degrade: str, blind_xml: Path | None = None
+    ) -> None:
         self.degrade = degrade
         cfg = load_config()
         build_decoder(cfg.imu)      # valida el cableado del config antes de arrancar
 
+        # DOS ARCHIVOS, no uno. `xml_path` es la PLANTA y puede traer un prop;
+        # `blind_xml` es el modelo del FILTRO y es siempre el brazo pelado.
+        # Compilar el modelo ciego desde el envoltorio le meteria la caja
+        # adentro al filtro, y entonces un golpe dejaria de ser dinamica no
+        # modelada: la demo seguiria corriendo igual y ya no mostraria lo que
+        # dice mostrar. Por defecto son el mismo archivo, que es el caso sin
+        # prop y el que usa cualquier llamador viejo.
         self.model, self.data = load_model(xml_path)
         self.dt = float(self.model.opt.timestep)
-        self.model_b, self.data_b = blind_variant(xml_path)
+        self.model_b, self.data_b = blind_variant(blind_xml or xml_path)
         self.nx = state_dim(self.model_b)
 
         self.imu_rows = rows_of(self.model_b, *cfg.imu.layout)
@@ -218,9 +283,14 @@ class Teleop:
         if code in KEYMAP:
             idx, sign = KEYMAP[code]
             self.held[idx] = sign
-        elif code == ord("G"):
+        elif code == KEY_STOP:
+            self.held.clear()
+        elif code == KEY_GHOST:
             self.show_ghost = not self.show_ghost
-        elif code == ord("R"):
+        elif code == KEY_HOME:
+            # Frenar tambien: si no, vuelve al reposo y se va de nuevo sola
+            # en el mismo tick, que parece que la tecla no hizo nada.
+            self.held.clear()
             self.ctrl[:] = self.q0
 
     def jog(self) -> None:
@@ -237,7 +307,13 @@ class Teleop:
         for idx, sign in self.held.items():
             lo, hi = self.ctrl_range[idx]
             self.ctrl[idx] = float(np.clip(self.ctrl[idx] + sign * step, lo, hi))
-        self.held.clear()       # sin repeticion de tecla: un evento, un paso
+        # `held` NO se limpia aca: la tecla queda trabada y la junta sigue
+        # andando hasta que la frenan. Es a proposito y es la unica opcion que
+        # da un movimiento continuo -- `key_callback` solo avisa de la tecla
+        # APRETADA, nunca de la soltada, asi que no hay un evento de release
+        # con el cual parar. Lo para KEY_STOP, o la tecla opuesta invirtiendo,
+        # o el tope de `ctrlrange`. Si se limpiara, cada tecla seria un paso de
+        # JOG_RAD_S / RENDER_HZ = 0.01 rad y cruzar un rango tomaria 150 golpes.
 
     # -- un tick ------------------------------------------------------------
 
@@ -295,6 +371,58 @@ class Teleop:
         return self.data_b
 
 
+def _snapshot_view_options(viewer: Any) -> tuple[Any, Any]:
+    """Copia de las banderas de visualizacion, para volver a ponerlas cada tick.
+
+    El visor se queda con las teclas ANTES de pasarlas a `key_callback`, y las
+    26 letras estan tomadas (ver el comentario de `KEYMAP`). Las de `mjvOption`
+    -- las unicas que usa este mapa -- se pueden deshacer porque el handle
+    pasivo expone `viewer.opt`, asi que se guarda el estado de arranque y se
+    reescribe en cada cuadro: el toggle dura menos de 16 ms y no se ve.
+
+    Es cinturon Y tiradores junto con `show_left_ui=False`: esconder los
+    paneles puede que ya corte el despacho de atajos, pero eso NO se verifico,
+    y reescribir las banderas vuelve la pregunta irrelevante.
+    """
+    return (
+        np.asarray(viewer.opt.flags, dtype=np.uint8).copy(),
+        np.asarray(viewer.opt.geomgroup, dtype=np.uint8).copy(),
+    )
+
+
+def _restore_view_options(viewer: Any, snapshot: tuple[Any, Any]) -> None:
+    """Reescribe las banderas guardadas. Bajo `viewer.lock()`: el visor corre
+    en su propio hilo y esta leyendo `opt` para dibujar."""
+    flags, geomgroup = snapshot
+    with viewer.lock():
+        viewer.opt.flags[:] = flags
+        viewer.opt.geomgroup[:] = geomgroup
+
+
+def _check_ghost_starts_on_the_arm(teleop: Teleop, tol: float = 1e-5) -> float:
+    """Verifica que planta y fantasma arrancan en la MISMA pose. -> error en m.
+
+    Medido en esta maquina: 8.1e-08 m. Las dos arrancan del mismo equilibrio
+    servoado (`warmup_to_rest` bajo `q0`), asi que al abrir la ventana el
+    fantasma tiene que estar exactamente encima del brazo y el error visible
+    tiene que ser cero. Si esto se va, el estado inicial del filtro dejo de
+    coincidir con el de la planta y todo lo que se vea despues arranca torcido.
+
+    OJO con lo que NO prueba: compara POSES, no que cada geom dibuje su malla.
+    Un `dataid` equivocado deja las poses intactas y igual rinde el brazo mal
+    -- eso lo cubre `test_viz_live.py` contra `mjv_updateScene`.
+    """
+    db = teleop.ghost_data()
+    err = float(np.abs(np.asarray(teleop.data.geom_xpos) - np.asarray(db.geom_xpos)).max())
+    if err > tol:
+        raise SystemExit(
+            f"planta y fantasma arrancan en poses distintas: {err:.3e} m"
+            f" > {tol:.1e}. El estado inicial del EKF dejo de coincidir"
+            " con el de la planta."
+        )
+    return err
+
+
 def run(teleop: Teleop, with_plots: bool) -> None:
     """El lazo. Qt es el dueno del loop principal; el visor se sincroniza a mano.
 
@@ -324,16 +452,24 @@ def run(teleop: Teleop, with_plots: bool) -> None:
     n_steps = max(1, round((1.0 / RENDER_HZ) / teleop.dt))
     channels = [0, 6]
     state = {"frame": 0}
+    err0 = _check_ghost_starts_on_the_arm(teleop)
+    print(f"fantasma sobre la planta al arrancar: {err0:.1e} m de separacion")
     print(AYUDA)
 
+    # Sin los paneles: son la UI cuyos atajos se comen las teclas, y la ayuda
+    # de esta demo la imprime `AYUDA`. No alcanza por si solo -- ver
+    # `_snapshot_view_options`.
     with mujoco.viewer.launch_passive(
-        teleop.model, teleop.data, key_callback=teleop.on_key
+        teleop.model, teleop.data, key_callback=teleop.on_key,
+        show_left_ui=False, show_right_ui=False,
     ) as viewer:
+        view_opts = _snapshot_view_options(viewer)
 
         def tick() -> None:
             if not viewer.is_running():
                 app.quit()
                 return
+            _restore_view_options(viewer, view_opts)
             teleop.jog()
             y_plant, y_est = teleop.step(n_steps)
 
@@ -365,13 +501,23 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--degrade", choices=DEGRADATIONS, default="none",
                     help="rompe la corrida a proposito, para que la demo pueda fallar")
     ap.add_argument("--no-plots", action="store_true", help="solo el visor 3D")
+    ap.add_argument("--prop", choices=tuple(PROP_MODELS), default="none",
+                    help="objeto del entorno contra el cual chocar. UNO POR VEZ:"
+                         " son archivos distintos, no banderas acumulables")
     args = ap.parse_args(argv)
 
-    xml_path = resolve_repo_path(*XML_RELATIVE.parts)
-    teleop = Teleop(xml_path, args.degrade)
+    # La PLANTA lleva el prop; el FILTRO corre siempre sobre el brazo pelado.
+    # Las dos rutas se eligen aca y no adentro de `Teleop`, para que el unico
+    # lugar del script donde se decide que modelo se carga sea este.
+    plant_xml = resolve_repo_path(*PROP_MODELS[args.prop].parts)
+    blind_xml = resolve_repo_path(*XML_RELATIVE.parts)
+    if args.prop != "none":
+        print(f"prop: {args.prop} ({PROP_MODELS[args.prop].name})."
+              " El filtro NO lo tiene en su modelo.")
+    teleop = Teleop(plant_xml, args.degrade, blind_xml=blind_xml)
     run(teleop, with_plots=not args.no_plots)
 
-    print(f"\n=== teleop (degrade = {args.degrade}) ===")
+    print(f"\n=== teleop (degrade = {args.degrade}, prop = {args.prop}) ===")
     print(f"{teleop.runner.steps} predicts, {teleop.applied} actualizaciones aplicadas, "
           f"{teleop.runner.discarded} descartadas")
     if teleop.nis:
@@ -387,6 +533,14 @@ def main(argv: list[str] | None = None) -> int:
         "el brazo real el mismo filtro da NIS mediana 29 contra el objetivo 12.\n"
         "Para ver la demo fallar: --degrade swap | overconfident."
     )
+    if args.prop != "none":
+        print(
+            "\nCon un prop cargado hay UNA salvedad sobre lo de arriba: el prop esta\n"
+            "en la PLANTA y no en el modelo del filtro. Mientras no lo toques la NIS\n"
+            "se lee igual que siempre; en el momento del golpe salta, porque el\n"
+            "filtro no tiene con que explicar la fuerza de contacto. Ese salto es\n"
+            "DINAMICA NO MODELADA, y es lo unico de esta demo que no es plomeria."
+        )
     return 0
 
 
