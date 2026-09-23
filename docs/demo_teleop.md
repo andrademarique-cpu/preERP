@@ -584,18 +584,64 @@ primer tick. Se recorta contra `model.actuator_ctrlrange`, leido del modelo.
 La 4a junta (`act`) esta acoplada por tendon con rango `[0, 0]`: **sigue, no se
 comanda**. Por eso "todas las juntas" son tres y no cuatro.
 
+**Mando fino (2026-09-23).** Lo de arriba sigue valiendo para el VISOR. Tres
+agregados, cada uno util solo:
+
+- **Finura, teclas `1`..`5`**: (0.6, 0.3, 0.1, 0.03, 0.01) rad/s de jog y
+  (5, 2, 0.5, 0.2, 0.1) grados de paso. El nivel 1 es la velocidad de antes.
+  **`M`** alterna el modo paso a paso: cada tecla mueve un paso fijo y no
+  traba nada. Los digitos no estan en `mjVISSTRING` ni `mjRNDSTRING`
+  (verificado); la UI del visor los usa para `opt.geomgroup`, que el tick
+  restaura. `M` es "centro de masa", bandera de `mjvOption`. La finura y el
+  modo se escriben abajo a la izquierda de la escena con `viewer.set_texts`.
+- **Panel de control** (`build_panel`, ventana Qt aparte, `--no-panel` lo
+  saca). Ahi Qt SI entrega la suelta, asi que la junta se mueve **mientras**
+  se mantiene la tecla o el boton -/+. El auto-repeat del sistema (pares
+  suelta/aprieta con `isAutoRepeat`) se ignora; si el panel pierde el foco con
+  una tecla apretada, se frena. Slider y caja numerica fijan un angulo exacto
+  en grados, 0.1 de resolucion. Nunca toca `qpos`.
+- **Objetivo vs consigna.** Teclas y panel mueven `target`; lo que va a los
+  servos es `ctrl`, que se acerca a `target` a lo sumo `SLEW_RAD_S` = 1 rad/s
+  (`erp.trajectory.slew_limit`), debajo de los ~2 rad/s donde saturan. Un
+  angulo escrito lejos deja de ser un escalon, y `O` (reposo) tambien: antes
+  era `ctrl[:] = q0`, un escalon. `X` pisa el objetivo con la consigna, para
+  que la rampa no siga hacia un angulo escrito antes.
+
+Verificado sin pantalla: 1 s de jog en finura 5 mueve 0.573 grados; un paso
+en finura 3 es 0.500 grados; un objetivo de 2 rad en `rot` llega con la
+consigna a 1.0000 rad/s como maximo y termina **exactamente** en 2.0, con la
+planta en 2.000 y el estimado en 1.902 al llegar.
+
 ### 11.2 Strips
 
 ```python
-plots = LivePlots(channel_labels=["link1_acc_x", "link1_gyro_x"],
+plots = LivePlots(links=["link1", "link2"],
                   joint_labels=["rot", "link1", "link2"],
                   nis_target=12.0, ...)
-channels = [0, 6]     # dentro de las 12 filas de IMU
+acc = teleop.acc_cols   # [link1 xyz, link2 xyz] dentro de las 12 filas de IMU
 ```
 
-Dos canales, uno de cada tipo: con 12 el grafico no se lee y la pregunta es la
-misma. Indice 0 es `link1_acc` x y el 6 es `link1_gyro` x, dado el orden de
-bloques de `cfg.imu.layout`. `nis_target` = 12 = cantidad de canales medidos.
+**Tres ventanas, un grafico por variable** (2026-09-23). Una por link con un
+grafico por eje de aceleracion (x, y, z), cada uno con planta (verde),
+medicion aplicada (puntos ambar) y `h(x_hat)` (azul punteado); y una de juntas,
+**un color por junta** -- planta continua, estimado punteado del mismo color --
+sobre el NIS. La version anterior ponia
+`link1_acc_x`, `link1_gyro_x` y las tres juntas en ejes compartidos, las juntas
+todas del mismo verde, y no se distinguia que curva era cual. Tampoco
+graficaba las mediciones ni el NIS: `push_measurement` y `push_nis` existian y
+la demo nunca los llamaba. Ahora `Teleop.updates` guarda las actualizaciones
+aplicadas en el tick, selladas en el instante de MUESTRA.
+
+`acc_cols` se busca por nombre (`link1_acc`, `link2_acc`) dentro de
+`imu_rows` y no se escribe `0:6`: depende del orden de bloques de
+`cfg.imu.layout`, y con otro orden se graficaria el giroscopo en m/s² sin
+ningun error. `nis_target` = 12 = cantidad de canales medidos.
+
+**Ejes y fijos**: ±20 m/s² y −3..3 rad. Con autoescala el ruido de 0.05 m/s²
+en reposo llena el grafico y parece que el brazo tiembla. Medido con un jog
+que lleva cada junta de punta a punta: la planta queda dentro de ±15 m/s² y
+`h(x_hat)` toca −30 en `link2_acc_x` un instante en una inversion; con prop,
+los golpes llegan a ±60 y se recortan en el borde, donde igual se ven.
 
 Redibuja cada 2 ticks (30 Hz) y no cada tick: matplotlib redibuja una figura
 entera y no puede sostener eso, que es por que `[live]` es pyqtgraph y no
@@ -694,6 +740,85 @@ python scripts/make_golden_run.py --check    # OK ... a rtol=1e-12
 
 Si eso se pone rojo despues de un refactor, el refactor movio los numeros. **No
 se regenera la fixture para que pase.**
+
+---
+
+## 14b. La variante sobre el brazo REAL: `scripts/demo_teleop_real.py`
+
+Agregada 2026-09-23. **Todavia no se corrio sobre hardware**: todo lo de abajo
+se verifico sin abrir COM6 ni COM7. La misma estructura que este demo -- sesion,
+tick de Qt, visor con fantasma, `LivePlots`, panel -- y otras fuentes:
+
+| Vista | Aca (sim) | En `demo_teleop_real.py` |
+|---|---|---|
+| planta | el modelo de planta, la verdad | el mismo modelo integrado bajo la **consigna** que se manda al brazo: un modelo de la consigna, no la verdad. `--plant-delay` la atrasa `arm_lag_s` = 0.395 s |
+| fantasma | EKF sobre la IMU simulada | el EKF de las **celdas 18-19 del notebook** sobre las IMUs reales |
+| medido | `LiveSimSensor` | `SerialIMUSensor`, TODAS las muestras, sesgo restado |
+| graficos | acc | acc **y giro** por link (`LivePlots(kinds=...)`), ±20 m/s² y ±1.5 rad/s fijos |
+
+Sin `--plant-delay` el fantasma va ~0.4 s atras de la planta en movimiento: es
+el atraso de transporte del brazo, no el filtro.
+
+**El filtro es el del notebook y no el de aca**: `P0` de la celda 18 (1/5/0.5
+grados, no 1 grado plano) y el reposo calentado en el modelo de PLANTA. El
+sesgo se estima en vivo con `rest_bias(expected_rest = h(x_rest))` sobre ~1 s
+quieto despues del homing y se resta a cada `z` -- la aritmetica de `z -
+imu_bias` de la celda 19. `apply_calibration` no se usa porque instalaria la
+`R` de reposo que P6 rechazo. Una calibracion invalida aborta: viene con sesgo
+cero y parece exito.
+
+**Base de tiempo**: `perf_counter` absoluto, porque eso sella `SerialIMUSensor`
+-- no el tiempo de simulacion de este demo. `buffer_horizon` = los 0.050 s del
+config, redondeados a pasos enteros con `ceil(H/dt - 1e-9)` (25 pasos; sin el
+epsilon, `0.05/0.002 = 25.000...04` daria 26).
+
+**Seguridad** (decidido con el usuario): por defecto `--arm dry --imu sim`, sin
+hardware; el brazo real pide `--arm real --arm-port` y escribir `si`. Homing a
+[0,0,0] a velocidad 30, con la **llegada verificada leyendo los angulos**: las
+tres juntas a 2 grados, 3 lecturas seguidas cada 0.2 s, o aborta a los 20 s.
+`sync_send_angles` solo NO alcanza, y el notebook confia en el: en pymycobot
+4.0.7, `MyPalletizer260.sync_send_angles` manda, sale del bucle en cuanto
+`is_moving()` da 0 y **devuelve 1 siempre**, incluso por timeout -- con ~0.4 s
+de cola en el firmware, el primer `is_moving()` puede llegar antes de que el
+brazo arranque. Verificado sin hardware con un transporte que imita esa vuelta
+inmediata: espera 15 lecturas lejanas y 3 buenas; aborta si nunca llega, si
+`get_angles` da `-1`, o a 2.5 grados; una lectura buena suelta en movimiento no
+cuenta. Segunda red: si el brazo se mueve en la ventana de reposo, el
+giroscopo invalida el sesgo y tambien aborta. Tope de consigna 0.5 rad/s (y las
+velocidades de jog recortadas a el); `ctrlrange` verificado al arrancar dentro
+de los limites de la API. 25 Hz de consignas en promedio, solo si cambian. En el
+visor las teclas de junta dan UN paso con el brazo real; continuo solo desde el
+panel. Frenar, cerrar, Ctrl-C o una IMU muerta cortan las consignas; los servos
+NO se liberan. El freno de emergencia es el interruptor.
+
+**Verificado sin hardware** (ensayo con reloj virtual; la ruta "brazo real"
+contra el `FakeMyCobot` de `test_robot.py`, la IMU real contra el `FakePort` de
+`conftest.py`):
+
+- 354 consignas en 18 s de manejo: todas dentro de `ctrlrange` y de la API, J4
+  en 0, `send_radians` a velocidad 100; tasa de consigna maxima **0.500 rad/s**.
+- Envios: **25.0 Hz en promedio**, con intervalos que alternan **33 y 50 ms** --
+  la grilla absoluta de 40 ms cae en ticks de 60 Hz. Por eso "a lo sumo 25 Hz"
+  vale en promedio, no intervalo por intervalo.
+- Al soltar, el objetivo queda fijo, la consigna lo alcanza y **no se manda
+  nada mas**. Una tecla del visor con el brazo real da un paso y no traba.
+- La guarda salta ante un salto de consigna; despues de una falla no sale nada.
+- IMU real (falsa): sesgo inyectado recuperado a **4e-7**, 0 descartadas con
+  sellos de llegada, y el lector muerto -> `SensorError` -> falla -> 0 envios.
+- EKF sobre la IMU simulada: 0 descartadas, NIS mediana **6.9**. Error de junta
+  tras 18 s de movimiento: rot **0.019**, link1 **0.008**, link2 **0.003** rad.
+  rot es el peor porque gira alrededor de la vertical: la gravedad no lo ve y
+  solo el giroscopo lo observa, asi que deriva. Esperalo tambien en el brazo.
+- `--plant-delay` agrega **395.0 ms** sobre los ~46 ms del servo simulado. La
+  primera version sostenia la historia de consignas (un punto por tick) y
+  agregaba 411 ms; ahora se interpola a 500 Hz.
+- Rangos bajo el tope: planta acc -9.8..11.2 m/s², giro ±1.0 rad/s; estimado
+  acc -9.7..12.2, giro ±0.6. De ahi ±1.5 rad/s para el giro.
+
+**La primera vez sobre hardware**, en este orden: `--imu real` solo (~20 Hz,
+sesgo valido, `descartadas` 0, NIS finita); despues `--arm real --imu real`,
+una junta, finura 5 en pasos, con la mano en el interruptor. Cada sesion se
+guarda en `data/sessions/<fecha>/` (en `.gitignore`), con el CSV **crudo**.
 
 ---
 

@@ -19,7 +19,7 @@ from __future__ import annotations
 import numpy as np
 import pytest
 
-from erp.trajectory import resample, sine_sweep
+from erp.trajectory import resample, sine_sweep, slew_limit
 
 # The notebook's knobs (cell 3) and the golden run's (make_golden_run.py).
 PERIODO_S = 3
@@ -226,3 +226,65 @@ def test_resample_refuses_mismatched_shapes() -> None:
         resample(np.column_stack([t, t]), q, 25.0)
     with pytest.raises(ValueError, match="rate_hz must be"):
         resample(t, q, 0.0)
+
+
+# -- slew_limit: the teleop demo's rate-limited setpoint ---------------------
+
+
+def _slew_clip(current, target, max_step):
+    """The obvious form, kept as the broken variant: misses by one ULP."""
+    cur = np.asarray(current, dtype=np.float64)
+    return cur + np.clip(np.asarray(target) - cur, -max_step, max_step)
+
+
+def _slew_bang_bang(current, target, max_step):
+    """Always a full step toward the target: overshoots and never settles."""
+    cur = np.asarray(current, dtype=np.float64)
+    return cur + np.sign(np.asarray(target) - cur) * max_step
+
+
+def _run(fn, current, target, max_step, ticks):
+    out = [np.asarray(current, dtype=np.float64)]
+    for _ in range(ticks):
+        out.append(fn(out[-1], target, max_step))
+    return np.array(out)
+
+
+def test_slew_limit_never_moves_more_than_one_step_per_tick() -> None:
+    step = np.array([0.01, 0.02, 0.005])
+    path = _run(slew_limit, [1.5, 0.0, 1.0], [-1.0, 1.0, 1.02], step, 400)
+    assert np.all(np.abs(np.diff(path, axis=0)) <= step + 1e-15)
+
+
+def test_slew_limit_lands_exactly_and_the_obvious_form_does_not() -> None:
+    # Only a one-tick jump over a large distance separates them: over a slow
+    # approach the last subtraction is exact and both land (see the
+    # docstring's measurement). So the falsification is the jump, not a run.
+    for c, t in ((1.2, 0.1), (0.7, 0.1), (1.5693, 0.2)):
+        assert slew_limit([c], [t], 2.0)[0] == t
+        assert _slew_clip([c], [t], 2.0)[0] != t            # e.g. 0.10000000000000009
+    target = np.array([0.1, 0.09999999999999998, 0.2])
+    path = _run(slew_limit, [1.2, 0.7, 1.5693], target, 0.01, 200)
+    assert np.array_equal(path[-1], target)
+
+
+def test_slew_limit_settles_and_bang_bang_chatters() -> None:
+    path = _run(slew_limit, [0.0], [0.105], 0.01, 50)
+    assert np.all(path[11:] == 0.105)                       # arrived, and stays
+    bad = _run(_slew_bang_bang, [0.0], [0.105], 0.01, 50)
+    assert np.ptp(bad[11:]) == pytest.approx(0.01)          # still hopping a full step
+
+
+def test_slew_limit_zero_step_freezes_and_joints_are_independent() -> None:
+    assert np.array_equal(slew_limit([0.3, 0.4], [1.0, 1.0], 0.0), [0.3, 0.4])
+    out = slew_limit([0.0, 0.0], [1.0, -1.0], [0.1, 0.0])
+    assert np.array_equal(out, [0.1, 0.0])
+
+
+def test_slew_limit_refuses_nonsense() -> None:
+    with pytest.raises(ValueError, match="differ in shape"):
+        slew_limit([0.0, 0.0], [1.0], 0.1)
+    with pytest.raises(ValueError, match="max_step"):
+        slew_limit([0.0], [1.0], -0.1)
+    with pytest.raises(ValueError, match="max_step"):
+        slew_limit([0.0], [1.0], np.nan)

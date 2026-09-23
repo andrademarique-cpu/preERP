@@ -31,3 +31,9 @@ data/processed/figures/
 
 # MuJoCo writes this next to the working directory whenever a model loads.
 MUJOCO_LOG.TXT
+
+# Sessions written by scripts/demo_teleop_real.py. *.csv is Git-LFS tracked, so
+# committing every session would push a binary per run. A session worth keeping
+# is promoted to data/raw/ by hand -- and data/raw/ feeds the golden check, so
+# that is a deliberate act (see CLAUDE.md, "If the golden check goes red").
+data/sessions/
