@@ -78,6 +78,16 @@ class MyPalletizerArm(ArmInterface):
         blocking_send: bool = False,
         transport: ArmTransport | None = None,
     ) -> None:
+        # Before anything can open a port. An envelope with one recording per
+        # side has no measured margin and, in its flat zone, carries the value
+        # reached by pushing hard -- ~4 deg past where the stop is met gently.
+        # Good enough for a dry run, not for this arm.
+        if jmap.coupled is not None and not jmap.coupled.ready:
+            raise ValueError(
+                "the J3(J2) envelope is not ready to gate the real arm: "
+                f"{jmap.coupled.not_ready_reason} ({jmap.coupled.source or 'envelope'}). "
+                "Repeat the recordings (docs/j2j3_envelope_handoff.md) and re-export it."
+            )
         if transport is None:
             if port is None:
                 raise ValueError("give either a port or a transport")
@@ -94,8 +104,13 @@ class MyPalletizerArm(ArmInterface):
         self.name = f"MyPalletizerArm({port}, speed={speed}, blocking_send={blocking_send})"
 
     def send(self, q_rad: npt.ArrayLike, speed: int | None = None) -> None:
-        """Command one setpoint, given as (n,) model radians."""
-        deg = self.jmap.to_api_deg(q_rad)[0]
+        """Command one setpoint, given as (n,) model radians.
+
+        :meth:`JointMap.check_setpoint` runs first: pymycobot validates no
+        angle in this class (see :class:`JointMap`), so this is the last check
+        before the firmware. A rejected setpoint writes nothing to the port.
+        """
+        deg = self.jmap.check_setpoint(q_rad)
         sp = self.speed if speed is None else int(speed)
         if self.blocking_send:
             self.mc.send_angles([float(d) for d in deg], sp)

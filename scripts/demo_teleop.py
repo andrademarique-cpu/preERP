@@ -378,8 +378,8 @@ class Teleop:
 
         Recorta contra `actuator_ctrlrange` y no contra +-algo simetrico: los
         rangos de este brazo son asimetricos (rot +-2.79, link1 0..1.57, link2
-        0..1.04), asi que un paso simetrico desde cero se sale del rango en dos
-        de los tres en el primer tick.
+        -1.6055..1.04), asi que un paso simetrico desde cero se sale del rango
+        en link1 en el primer tick.
         """
         lo, hi = self.ctrl_range[idx]
         self.target[idx] = float(np.clip(value_rad, lo, hi))

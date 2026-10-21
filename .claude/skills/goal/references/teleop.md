@@ -37,16 +37,23 @@ and is not commandable — it follows. Say so in the on-screen help rather than
 letting the user hunt for a key that does nothing.
 
 **The ranges are asymmetric**, so a naive ±step from zero leaves the range
-immediately on two of three:
+immediately on `link1`:
 
 | Actuator | ctrlrange (rad) |
 |---|---|
 | `rot_servo` | −2.79 … +2.79 |
 | `link1_servo` | 0 … 1.57 |
-| `link2_servo` | 0 … 1.04 |
+| `link2_servo` | −1.6055 … 1.04 |
+
+`link2` was `0 … 1.04` until 2026-10-21. It was widened to just inside the
+API's −92° floor because the real J3 does go negative
+(`docs/j2j3_envelope_handoff.md`). The golden run did not move.
 
 Clamp every jog to `model.actuator_ctrlrange`. Read it from the model — do not
-copy the table above into code.
+copy the table above into code. On the **real** arm that box is not enough:
+J3's reachable range depends on J2, so `demo_teleop_real.py` also clamps to
+the measured envelope (`JointMap.clamp_rad`). The sim demo does not, because
+its plant is the model and can reach anything inside the box.
 
 ## The scene, and why the floor is inside a body
 

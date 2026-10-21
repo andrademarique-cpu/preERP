@@ -95,10 +95,15 @@ class DryRunArm(ArmInterface):
         The API's ``speed`` is a firmware scale from 1 to 100, not deg/s, so
         there is nothing meaningful to do with it here; the speed cap is
         :attr:`rate_limit_dps`.
+
+        The setpoint goes through :meth:`JointMap.check_setpoint` first, the
+        same guard the real arm runs, so a dry run rejects exactly what the
+        hardware would. A rejected setpoint is never queued.
         """
+        api_deg = self.jmap.check_setpoint(q_rad)
         now = float(self._clock())
         self._advance(now)
-        self._queue.append((now + self.latency_s, self.jmap.to_api_deg(q_rad)[0]))
+        self._queue.append((now + self.latency_s, api_deg))
 
     def read(self) -> Array | None:
         """(4,) API degrees, quantised. Never ``None`` -- this arm always replies."""

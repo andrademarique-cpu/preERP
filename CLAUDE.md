@@ -55,10 +55,12 @@ pip install -e ".[dev]"                 # add [app] for real hardware, [viz] for
 conda env create -f environment.yml     # installs -e .[dev,viz]; creates `erp`; this machine uses `EKF`
 
 # The checks CI runs, in the order ci.yml runs them. Timings on this machine.
+# All five results below re-run in `EKF` on 2026-10-21, working tree over
+# 07f7ce8 with the J3(J2) envelope guard (uncommitted): +23 tests, otherwise unchanged.
 ruff check software/src software/tests  # clean; rule set pinned via [tool.ruff.lint] select
 mypy software/src                       # strict; clean (48 files)
 grep -rEl ...                           # import-direction, the 3rd step -- BEFORE pytest
-pytest -q                               # 347 passed, 1 FAILED, 1 skipped -- RED, see below
+pytest -q                               # 370 passed, 1 FAILED, 1 skipped -- RED, see below
 
 # RED ON `main` since f0a8e49 (2026-09-23) -- clean tree, CI will be red too.
 # test_plant.py::test_the_scenery_is_index_safe asserts the floor does not
@@ -69,7 +71,7 @@ pytest -q                               # 347 passed, 1 FAILED, 1 skipped -- RED
 
 # The fast loop while working. `mujoco` marks the tests that need mujoco AND
 # the Git-LFS model assets -- that shared requirement, not what they assert.
-pytest -q -m "not mujoco"               # 289 passed, 1 skipped, 59 deselected, ~2.5 s -- green
+pytest -q -m "not mujoco"               # 309 passed, 1 skipped, 62 deselected, ~3 s -- green
 
 # The golden check. Not a separate CI step: `test_golden_run.py` imports
 # `run_pipeline` from this script, so `pytest` covers it. Run it directly
@@ -202,7 +204,22 @@ reads as a physics problem. Both are already installed in `EKF`
 `pyproject.toml` has carried a comment since P0 about pyqtgraph having
 been a dependency here once. Nothing in `erp/` imports either at package
 scope — `erp/viz/__init__.py` withholds `erp.viz.live` — so a tree
-without them imports and tests clean, which is what CI runs.
+without them imports and tests clean.
+
+**`632d1b0` (2026-09-24, "Fixed some missing dependencies") broke two
+halves of the paragraph above, and it is unresolved.** It added
+`pyqtgraph` and **`PyQt6`** to `[dev]`, while `[live]` still says `PyQt5`.
+1. CI installs `.[dev]`, so CI now **has** pyqtgraph and a Qt binding. It
+   no longer tests the "imports clean without them" property, and nothing
+   else does either, because `EKF` has them too.
+2. `EKF` has PyQt5 5.15.11 and **no PyQt6**, and `viz/live.py`'s
+   docstring reasons about PyQt5's `.pyi` stubs. Re-running
+   `pip install -e ".[dev]"` there puts both bindings in one env, and then
+   pyqtgraph's import order decides which one the demo runs on, not this
+   repo. Verified 2026-10-21 by reading `pyproject.toml` and `pip list`;
+   CI's actual behaviour after the change has not been checked.
+Decide which binding is intended, and whether Qt belongs in `[dev]` at
+all, before relying on either extra.
 
 **Dependencies are declared once, in `pyproject.toml`.**
 `environment.yml` supplies only the interpreter and pip, then installs
@@ -490,11 +507,10 @@ These were measured, not assumed, and re-deriving them is expensive:
   replay of the same trajectory over all 48 signed permutations and both
   chip assignments, reproduced on two recordings. The layout lives in
   `IMUDecoder`'s `layout`/`axis_maps` and in `config/estimation.yaml`,
-  not in code. **Note the two disagree today**: `conftest.py` and the
-  config assign the chips to opposite links. The config carries the
-  fitted residuals (gyro rms 0.06–0.10 rad/s vs 0.34 for the swapped
-  wiring), so trust the config and treat the test fixture as arbitrary
-  test data.
+  not in code. The config carries the fitted residuals (gyro rms
+  0.06–0.10 rad/s vs 0.34 for the swapped wiring) and is the definition;
+  `conftest.LAYOUT` agrees with it since P7 (re-read 2026-10-21 — this
+  bullet said they disagreed for a while after that stopped being true).
 - **The real arm lags the MuJoCo replay by ~395 ms** (arm transport and
   queueing, not the IMUs). Log for a tail after the last setpoint or the
   motion gets cut.
@@ -673,7 +689,7 @@ re-derive. Each has a test that would fail if it stopped being true.
 | `software/src/erp/models/` | `base` (`DiscreteDynamics` protocol), `linear` (`LinearDynamics`, `affine_predict`), `finger_config` (legacy finger dataclasses, dead) | numpy only; **no mujoco** — that is what makes the no-mujoco EKF test possible |
 | `software/src/erp/sim/` | `mujoco` (`f_dyn`/`F_dyn`/`h_dyn`/`H_dyn`, the paired forms, `linearize`, `make_Q`, `state_dim`), `plant` (`load_model`, `blind_variant`, `warmup_to_rest`, `sensor_layout`), `dynamics` (`MujocoDynamics`) | mujoco yes, `erp.sensors` never |
 | `software/src/erp/estimators/` | `ekf` — `EKF` over a `DiscreteDynamics`; no `MjModel`, no mujoco import | builds on `models/` + `core/` |
-| `software/src/erp/robot/` | `base` (`ArmInterface`, `JointMap`), `dry_run` (`DryRunArm`), `mypalletizer` (`MyPalletizerArm`) — **command sink, never a measurement source** | may depend on `core/`; nothing in the estimation stack may import it |
+| `software/src/erp/robot/` | `base` (`ArmInterface`, `JointMap`, `CoupledLimit`), `dry_run` (`DryRunArm`), `mypalletizer` (`MyPalletizerArm`) — **command sink, never a measurement source**. **Each arm's `send` runs `JointMap.check_setpoint` before touching its transport** (API box + the measured J3(J2) envelope when `JointMap.coupled` is set), so an out-of-range setpoint raises and nothing is queued or written; one contract test over both arms pins it. `MyPalletizerArm` refuses an envelope with < 2 recordings per side before opening the port. The envelope is `data/processed/j2j3_envelope.csv`; only `demo_teleop_real.py` loads it so far | may depend on `core/`; nothing in the estimation stack may import it |
 | `software/src/erp/trajectory.py` | `sine_sweep`, `resample` — the setpoint profile | numpy only |
 | `software/src/erp/sensors/` | `base` (`Sensor` ABC), `stream` (threaded base), `imu_serial` (`IMUDecoder`, `SerialIMUSensor`), `replay`, `sim`, `clock` (`ClockSync` — device→host, *not* `core.clock`), `mujoco` (`rows_of`, `make_R`), `live` (`LiveSimSensor`, a `Sensor` over a *running* plant — added with the teleop demo, not an ADR-0002 phase). `calibration_from_samples` is **re-exported, not defined here** — it moved to `calibration/` at P6 | may depend on `core/` and `calibration/` |
 | `software/src/erp/io/` | `log` (`MeasurementLog`), `paths` (`repo_root`, `resolve_repo_path`, `resolve_model_path`), `config` (P7 — `load_config`, `build_decoder`, the frozen config dataclasses, `ConfigError`). **English** | `core/` only for `log`/`paths`. `config` imports `sensors.IMUDecoder`, so it is deliberately **not** re-exported from `io/__init__.py` — `import erp.io` must stay core-only, because `fusion/` may import `erp.io` and may never reach `sensors/`. A subprocess test pins it |
@@ -681,14 +697,14 @@ re-derive. Each has a test that would fail if it stopped being true.
 | `software/src/erp/calibration/` | `rest` — `calibration_from_samples` (moved here from `sensors/imu_serial.py` at P6, still re-exported there), `rest_bias` (the offline counterpart of `SerialIMUSensor.calibrate`). **English** | `core/` + numpy **only**; `sensors/` imports this, never the reverse |
 | `software/src/erp/analysis/` | `lag` (`estimate_lag`), `site` (`propagate_to_site`), `consistency` (`ConsistencyReport`, `consistency_report`). Landed at P8. **Spanish** — forced: § 5.3 required moving the first two with their Spanish docstrings intact | `core/` + `sim/`; imports mujoco (via `h`/`H`), so a test that exercises it end to end carries the `mujoco` marker |
 | `software/src/erp/viz/` | `geometry` (`sigma_per_axis`, `ellipsoid_axes`, `principal_tilt_deg` — pure numpy), `theme`, `figures` (`three_way`, `sensor_compare`, `effector_band`); and, from the teleop demo, `strips` (`RingBuffer`), `ghost` (`draw_ghost` — the fourth mujoco caller) and `live` (the pyqtgraph window, `[live]` extra). Landed at P8; the old "geometry only, no backend imports" rule was overturned by ADR-0002 § 4.2. **English** | matplotlib allowed, gated behind `[viz]`. `__init__.py` re-exports **only** `geometry` and nothing else -- not `strips`, `ghost` or `live` -- so `import erp.viz` stays numpy-only and CI (which installs `.[dev]`) can import it |
-| `software/tests/` | 349 tests. `conftest` (fake serial port + IMU layout), `test_sensor_contract` (one suite over all three `Sensor`s), `test_imu_serial`, `test_clock`, `test_replay_log`, `test_paths`, `test_plant` (10, incl. the scenery guards), `test_golden_run`, `test_robot`, `test_trajectory` (incl. `slew_limit`, each case paired with a broken variant), `test_core_clock`, `test_dynamics`, `test_ekf_linear`, `test_fusion_runner` (47, no mujoco — carries a verbatim copy of the old `run_imu_ekf` as a bit-identity oracle), `test_calibration` (11, 9 of them fast — same oracle trick against notebook cell 19's block), `test_config` (24, 21 of them fast — every malformed-config case paired with the good file it mutates), `test_analysis` (20 — verbatim oracles for the two moved functions, plus a broken variant per metric), `test_viz` (13 — the ellipse arithmetic runs always, the figures skip without `[viz]`), `test_live_sensor` (12, all fast — the live sampler's grid and latency), `test_viz_live` (14, 9 fast — the ring buffer always, the ghost geoms behind the `mujoco` marker; the ghost half uses `mjv_updateScene` as its oracle, never a hand-written `dataid`) | — |
+| `software/tests/` | 372 tests. `conftest` (fake serial port + IMU layout), `test_sensor_contract` (one suite over all three `Sensor`s), `test_imu_serial`, `test_clock`, `test_replay_log`, `test_paths`, `test_plant` (10, incl. the scenery guards), `test_golden_run`, `test_robot` (incl. the J3(J2) envelope guard, run over both arms), `test_trajectory` (incl. `slew_limit`, each case paired with a broken variant), `test_core_clock`, `test_dynamics`, `test_ekf_linear`, `test_fusion_runner` (47, no mujoco — carries a verbatim copy of the old `run_imu_ekf` as a bit-identity oracle), `test_calibration` (11, 9 of them fast — same oracle trick against notebook cell 19's block), `test_config` (24, 21 of them fast — every malformed-config case paired with the good file it mutates), `test_analysis` (20 — verbatim oracles for the two moved functions, plus a broken variant per metric), `test_viz` (13 — the ellipse arithmetic runs always, the figures skip without `[viz]`), `test_live_sensor` (12, all fast — the live sampler's grid and latency), `test_viz_live` (14, 9 fast — the ring buffer always, the ghost geoms behind the `mujoco` marker; the ghost half uses `mjv_updateScene` as its oracle, never a hand-written `dataid`) | — |
 | `scripts/` | `make_golden_run.py` — generates and re-checks the golden fixture. **Emptied at P8**: it now holds `run_pipeline`, `_metadata` and `main` and nothing else, i.e. configuration and a call. `demo_three_way.py` — the live three-way demo (plant truth vs noisy virtual sensor vs EKF estimate), P8's acceptance artifact. `demo_teleop.py` — the interactive teleop demo, outside the roadmap; `efc8df7`'s render bugs were fixed on 2026-09-22 and `/goal` is its guide. `demo_teleop_real.py` — its hardware sibling (2026-09-23): the same loop driving the real arm through `MyPalletizerArm` with the notebook's cells 18–19 EKF on the real IMUs; defaults to `--arm dry --imu sim`, **not yet run on hardware**, see `docs/demo_teleop.md` § 14b. It imports `demo_teleop` for the keymap and panel and carries a third copy of the notebook's `JMAP`. All four **Spanish** | not linted by CI, and not type-checked either (`mypy software/src` does not reach them) |
 | `data/processed/` | `golden_ekf_run.npz` — the frozen run. Git-LFS | — |
 | `.claude/skills/goal/` | `SKILL.md` + `references/teleop.md` (verified MuJoCo/pyqtgraph mechanics and traps) + `references/invariants.md` (what a change must not break) — the guide to `scripts/demo_teleop.py`, invoked as `/goal`. The only project-local skill | — |
-| `notebooks/` | `mypalletizer260EKF.ipynb` — **the driver application**; `viewer.ipynb` (MuJoCo viewer + `SimLog`); `finger_imu_toolkit.ipynb` (finger EKF rebuilt on `erp`); `finger_imu_practice.ipynb`, `Palletizer.ipynb` (reference) | may import anything |
-| `mechanical/mujoco_assets/` | `<dir>/MyPalletizer260.xml` + STL meshes, `axis_xyz.xml`, `scene.xml` (sky + checkered ground + offscreen framebuffer, one `<include/>` — **no longer visual only**, the floor collides), `prop_box.xml`, `prop_stair.xml`, and the two wrapper models that include them (`MyPalletizer260/MyPalletizer260_{box,stair}.xml`). **Git tracks the directory with a capital `P`, and CI is case-sensitive.** All the XML comments here are **Spanish** | — |
+| `notebooks/` | `mypalletizer260EKF.ipynb` — **the driver application**; `viewer.ipynb` (MuJoCo viewer + `SimLog`); `finger_imu_toolkit.ipynb` (finger EKF rebuilt on `erp`); `finger_imu_practice.ipynb` (reference); `Palletizer.ipynb` (reference, plus the live J2 → J3 envelope study since `07f7ce8`) | may import anything |
+| `mechanical/mujoco_assets/` | `<dir>/MyPalletizer260.xml` + STL meshes, `axis_xyz.xml`, `scene.xml` (sky + checkered ground + offscreen framebuffer, one `<include/>` — **no longer visual only**, the floor collides), `prop_box.xml`, `prop_stair.xml`, and the two wrapper models that include them (`MyPalletizer260/MyPalletizer260_{box,stair}.xml`). **Git tracks the directory with a capital `P`, and CI is case-sensitive.** All the XML comments here are **Spanish**. **`link2`'s `range` and `ctrlrange` reach negative J3 since 2026-10-21** (−1.6057 / −1.6055 rad, just inside the API's −92°; were `0 …`), because the measured lower stop is negative. `make_golden_run.py --check` stayed green at `rtol=1e-12`: the old 0 limit was never active in the golden run. The J3(J2) coupling is **not** in the XML — a `range` is a per-joint box; `JointMap.coupled` enforces it on commands | — |
 | `config/` | `estimation.yaml` — the fitted IMU layout, axis maps, rates. **Read by `erp.io.config` since P7**, and now the definition rather than documentation; the notebook still mirrors the values by hand. The finger sections moved to ADR-0001 appendix A | — |
-| `data/raw/` | three short IMU logs (raw device columns, calibrated columns, and a layout-named variant) + `palletizer_traj.npz` | — |
+| `data/raw/` | three short IMU logs (raw device columns, calibrated columns, and a layout-named variant) + `palletizer_traj.npz` + two `j2j3_envelope_raw*.csv` (hand-moved joint sweeps, `07f7ce8`) | — |
 | `ros2_ws/src/erp_ros/`, `docs/hardware/`, `electronics/` | **empty** (`.gitkeep` only) | — |
 | `firmware/` | `potentiometer_logger/potentiometer_logger.ino` only — the Teensy IMU firmware is not in this repo | out of scope for Python changes |
 | `docs/theory/`, `docs/adr/` | derivations and decision records — both describe the finger stack | — |
@@ -742,8 +758,8 @@ one now. `get_project_root` is kept as an alias.
   M1's acceptance test *is* the model, so it cannot be written without
   it. Tests needing mujoco **and** the Git-LFS assets carry
   `@pytest.mark.mujoco`; everything else stays in `pytest -m "not
-  mujoco"`, which runs in ~2.4 s. Default to the fast side — **289 of
-  349** tests are there, including the whole EKF-versus-Kalman
+  mujoco"`, which runs in ~2.4 s. Default to the fast side — **309 of
+  372** tests are there, including the whole EKF-versus-Kalman
   comparison. (Measured 2026-09-22. This line has now been stale twice —
   it read "150 of 196", then "258 of 311" — so trust the Commands block
   above, which is what gets re-measured, and re-run the two `pytest`
@@ -791,13 +807,35 @@ one now. `get_project_root` is kept as an alias.
 
 `git log --oneline -5` and `git status` are the authority; this section
 goes stale on its own. **The ADR-0002 work is now committed.** As of
-2026-09-23 the tip is `f0a8e49` (`added prop rendering`), with a clean
-tree. It carries the render fix and the collision work described below,
+2026-10-21 the tip is `07f7ce8`. Three commits landed
+after this section was last written, and the rest of the section does
+not account for them:
+
+- `cd2a533` (`Finished real demo / EKF getting lost bug is still
+  there`) — `scripts/demo_teleop_real.py` (+849 lines), plus changes to
+  `demo_teleop.py`, `viz/live.py`, `trajectory.py` and the arm XML.
+  **The commit message reports an open bug, "EKF getting lost", that is
+  recorded nowhere in the tree.** `docs/demo_teleop.md` § 14b does not
+  mention it. The message also suggests the real demo has run on the arm,
+  which contradicts "not yet run on hardware" below. Ask before you assume
+  either one.
+- `632d1b0` — Qt in `[dev]`, see the `[live]` paragraph under Commands.
+- `07f7ce8` (`measuring j3 angles in funciton of j2`) — a **J2 → J3
+  envelope** study in `notebooks/Palletizer.ipynb`. The parallelogram
+  makes J3's reachable range depend on J2, and the repo otherwise knows
+  only fixed boxes. The recording cell is gated by `MEDIR` and needs the
+  arm released and held by hand. The fit cell runs offline from
+  `data/raw/j2j3_envelope_raw*.csv` (Git-LFS; columns `t,j1..j4`, API
+  degrees). The commit also deleted `notebooks/mjmodel.mjb` (18 MB) and
+  `notebooks/imu_trajectory_log.csv`.
+
+Before those, the tip was `f0a8e49` (`added prop rendering`). It carries the render fix and the collision work described below,
 on top of `efc8df7` (`added demo_teleop but it still has a bug`),
 `129834c`, P8 (`erp.analysis` + `erp.viz` + the three-way demo),
 `d1c7c38` (the `/goal` skill), `0b53942` (P7, `erp.io.config`),
 `60e2d07` (the golden-log restore) and `677540e` (`added calibration
-package`). `587162f`, `677540e`, `efc8df7` and `f0a8e49` do not follow
+package`). `587162f`, `677540e`, `efc8df7`, `f0a8e49`, `cd2a533`,
+`632d1b0` and `07f7ce8` do not follow
 the conventional-commit rule this file states; follow the convention
 anyway.
 
@@ -850,11 +888,11 @@ three-way demo (`scripts/demo_three_way.py`), the **interactive teleop
 demo** (`scripts/demo_teleop.py` — keyboard jogging, the estimate drawn
 as a ghost over the plant, live pyqtgraph strips), and the palletizer
 notebook end to end (trajectory → real arm + MuJoCo replay → IMU log →
-EKF → end-effector covariance). 344 tests collected; on `main` at
-`f0a8e49` **342 pass, 1 fails, 1 skipped** (re-measured 2026-09-23 in `EKF` — the failure is
+EKF → end-effector covariance). 372 tests collected; on the working tree over `07f7ce8`
+**370 pass, 1 fails, 1 skipped** (re-measured 2026-10-21 in `EKF` — the failure is
 the scenery/collider disagreement described below, not a regression in any
 of the above). `ruff` and `mypy --strict` (48 files) are clean, `pytest -m
-"not mujoco"` is green (284 passed, 1 skipped, 59 deselected), and
+"not mujoco"` is green (309 passed, 1 skipped, 62 deselected), and
 `make_golden_run.py --check` reproduces the fixture at `rtol=1e-12`.
 
 ### The half-landed collision work (committed in `f0a8e49`, 2026-09-23)
