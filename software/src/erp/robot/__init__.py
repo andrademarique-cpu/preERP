@@ -10,8 +10,8 @@ An arm is a command sink, not a measurement source. The estimation stack
 this package; it sits beside :mod:`erp.sensors`, not under it.
 """
 
-from erp.robot.base import ArmInterface, JointMap
+from erp.robot.base import ArmInterface, CoupledLimit, JointMap
 from erp.robot.dry_run import DryRunArm
 from erp.robot.mypalletizer import MyPalletizerArm
 
-__all__ = ["ArmInterface", "DryRunArm", "JointMap", "MyPalletizerArm"]
+__all__ = ["ArmInterface", "CoupledLimit", "DryRunArm", "JointMap", "MyPalletizerArm"]

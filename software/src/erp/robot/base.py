@@ -16,7 +16,8 @@ from __future__ import annotations
 
 from abc import ABC, abstractmethod
 from collections.abc import Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, field
+from pathlib import Path
 from types import MappingProxyType
 from typing import Any
 
@@ -29,7 +30,213 @@ from erp.core.types import Array
 # signatures stay readable and `Any` does not travel past this module.
 MjModel = Any
 
-__all__ = ["ArmInterface", "JointMap"]
+__all__ = ["ArmInterface", "CoupledLimit", "JointMap"]
+
+# Slack for comparing API degrees against a limit, so a value clamped exactly
+# onto a bound and round-tripped through radians is not rejected by 1e-14.
+_TOL_DEG = 1e-9
+
+
+def _lerp_no_extrapolation(xp: Array, fp: Array, x: Array) -> Array:
+    """Piecewise-linear ``fp(x)``; NaN outside ``xp`` and next to a NaN sample.
+
+    Not ``np.interp``, because outside ``xp`` it returns the end value: at a
+    driver angle below the table it would report the first row's bounds, and
+    an unmeasured pose would read as permitted. Inside the table the two
+    agree -- a grid point returns its own value, and only the open interval
+    touching a NaN sample is NaN.
+    """
+    n = len(xp)
+    j = np.clip(np.searchsorted(xp, x, side="right") - 1, 0, n - 2)
+    x0, x1 = xp[j], xp[j + 1]
+    y0, y1 = fp[j], fp[j + 1]
+    w = (x - x0) / (x1 - x0)
+    v = np.where(w <= 0.0, y0, np.where(w >= 1.0, y1, y0 + w * (y1 - y0)))
+    return np.asarray(np.where((x < xp[0]) | (x > xp[-1]), np.nan, v), dtype=np.float64)
+
+
+@dataclass(frozen=True)
+class CoupledLimit:
+    """One joint's range as a function of another's, from a measured envelope.
+
+    On this arm the parallelogram couples the elbow to the shoulder: J3's
+    reachable range depends on J2. Measured by hand-moving the released arm
+    along each mechanical stop (``notebooks/Palletizer.ipynb``, recorded in
+    ``docs/j2j3_envelope_handoff.md``), the upper stop is flat near 58-63 deg
+    up to J2 ~ 41 deg and then falls to ~14 deg at J2 = 91 deg. A fixed box
+    (J3 <= 60) therefore lets a command push J3 into the stop for J2 >~ 45 deg.
+
+    The envelope is a lookup table in **API degrees**: the limited joint must
+    stay within ``[lo_deg, hi_deg]``, interpolated linearly in the driver
+    joint's angle. It is never extrapolated. A driver angle outside the table,
+    or inside a gap (a NaN sample), has **no** permitted value: a pose nobody
+    measured cannot read as allowed.
+
+    Parameters
+    ----------
+    driver_deg:
+        (M,) driver-joint angles, API degrees, strictly increasing.
+    lo_deg, hi_deg:
+        (M,) bounds of the limited joint at each ``driver_deg``, API degrees,
+        with any safety margin already applied. NaN marks an unmeasured sample.
+    driver_api_id, limited_api_id:
+        API joint numbers. J2 drives J3 on this arm.
+    recordings:
+        Side (``"max"``, ``"min"``) -> the raw recordings the envelope was
+        fitted from. This is what :attr:`ready` judges.
+    source:
+        Where the table came from, for error messages.
+    min_recordings:
+        Recordings per side needed before the envelope may gate the real arm.
+        The safety margin is the spread *between repeats* of the same side, so
+        with one recording per side it was not measured at all.
+    """
+
+    driver_deg: Array
+    lo_deg: Array
+    hi_deg: Array
+    driver_api_id: int = 2
+    limited_api_id: int = 3
+    recordings: Mapping[str, tuple[str, ...]] = field(default_factory=dict)
+    source: str = ""
+    min_recordings: int = 2
+
+    def __post_init__(self) -> None:
+        """Validate the table and make it read-only.
+
+        The ``lo < hi`` check is the one with a history: on 2026-10-21 the
+        two recordings were saved with their ``max``/``min`` labels swapped,
+        and the notebook exported an envelope with ``lo > hi`` at every
+        driver angle. A table like that is refused here, not loaded.
+        """
+        x = np.array(self.driver_deg, dtype=np.float64).reshape(-1)
+        lo = np.array(self.lo_deg, dtype=np.float64).reshape(-1)
+        hi = np.array(self.hi_deg, dtype=np.float64).reshape(-1)
+        if not (x.shape == lo.shape == hi.shape):
+            raise ValueError(
+                f"driver_deg, lo_deg and hi_deg must match: {x.shape}, {lo.shape}, {hi.shape}"
+            )
+        if x.size < 2:
+            raise ValueError("an envelope needs at least 2 driver angles")
+        if not np.all(np.isfinite(x)):
+            raise ValueError("driver_deg must be finite; mark an unmeasured row in lo/hi")
+        if np.any(np.diff(x) <= 0.0):
+            raise ValueError("driver_deg must be strictly increasing")
+        if self.driver_api_id == self.limited_api_id:
+            raise ValueError("a joint cannot limit itself")
+        both = np.isfinite(lo) & np.isfinite(hi)
+        if not both.any():
+            raise ValueError("no driver angle has both bounds measured")
+        crossed = both & (lo >= hi)
+        if crossed.any():
+            raise ValueError(
+                f"lower bound >= upper bound at {int(crossed.sum())} of {int(both.sum())} "
+                f"driver angles (first at {float(x[crossed][0]):.2f} deg) in "
+                f"{self.source or 'the envelope'}: an inverted envelope, which is exactly "
+                "what swapped max/min recordings produce"
+            )
+        for a in (x, lo, hi):
+            a.flags.writeable = False
+        object.__setattr__(self, "driver_deg", x)
+        object.__setattr__(self, "lo_deg", lo)
+        object.__setattr__(self, "hi_deg", hi)
+        object.__setattr__(
+            self,
+            "recordings",
+            MappingProxyType({k: tuple(v) for k, v in self.recordings.items()}),
+        )
+
+    @classmethod
+    def from_csv(
+        cls,
+        path: str | Path,
+        *,
+        driver_api_id: int = 2,
+        limited_api_id: int = 3,
+        min_recordings: int = 2,
+    ) -> CoupledLimit:
+        """Load the envelope ``notebooks/Palletizer.ipynb`` exports.
+
+        The file is ``data/processed/j2j3_envelope.csv``: ``#`` header lines
+        naming the recordings per side (``# max: a.csv, b.csv``), a column
+        line, then rows. The **margin-applied** columns ``j3_min_seguro`` and
+        ``j3_max_seguro`` are used, never the raw stops.
+        """
+        p = Path(path)
+        recordings: dict[str, tuple[str, ...]] = {}
+        columns: list[str] | None = None
+        with p.open(encoding="utf-8") as f:
+            for line in f:
+                if not line.startswith("#"):
+                    break
+                body = line[1:].strip()
+                for side in ("max", "min"):
+                    if body.startswith(f"{side}:"):
+                        names = body[len(side) + 1 :].split(",")
+                        recordings[side] = tuple(n.strip() for n in names if n.strip())
+                if body.startswith("j2,"):
+                    columns = [c.strip() for c in body.split(",")]
+        if columns is None:
+            raise ValueError(f"{p}: no column-name line (expected '# j2,j3_min,...')")
+        need = ("j2", "j3_min_seguro", "j3_max_seguro")
+        missing = [c for c in need if c not in columns]
+        if missing:
+            raise ValueError(f"{p}: missing columns {missing}")
+        data = np.loadtxt(p, delimiter=",", comments="#", ndmin=2)
+        if data.shape[1] != len(columns):
+            raise ValueError(f"{p}: {data.shape[1]} columns of data for {len(columns)} names")
+        col = {c: i for i, c in enumerate(columns)}
+        return cls(
+            driver_deg=data[:, col["j2"]],
+            lo_deg=data[:, col["j3_min_seguro"]],
+            hi_deg=data[:, col["j3_max_seguro"]],
+            driver_api_id=driver_api_id,
+            limited_api_id=limited_api_id,
+            recordings=recordings,
+            source=str(p),
+            min_recordings=min_recordings,
+        )
+
+    def bounds(self, driver_deg: npt.ArrayLike) -> tuple[Array, Array]:
+        """(lo, hi) of the limited joint at ``driver_deg``, API degrees.
+
+        NaN wherever the envelope has no measured value. Callers must treat
+        NaN as "forbidden", never as "unconstrained".
+        """
+        x = np.asarray(driver_deg, dtype=np.float64)
+        lo = _lerp_no_extrapolation(self.driver_deg, self.lo_deg, x)
+        hi = _lerp_no_extrapolation(self.driver_deg, self.hi_deg, x)
+        return lo, hi
+
+    @property
+    def driver_span_deg(self) -> tuple[float, float]:
+        """First and last driver angle with both bounds measured, API degrees."""
+        both = np.flatnonzero(np.isfinite(self.lo_deg) & np.isfinite(self.hi_deg))
+        return float(self.driver_deg[both[0]]), float(self.driver_deg[both[-1]])
+
+    @property
+    def not_ready_reason(self) -> str | None:
+        """Why this envelope may not gate the real arm yet, or ``None``."""
+        if not self.recordings:
+            return "the envelope names no recordings, so how it was measured is unknown"
+        short = {
+            side: len(files)
+            for side, files in self.recordings.items()
+            if len(files) < self.min_recordings
+        }
+        if short:
+            sides = ", ".join(f"'{s}' has {n}" for s, n in sorted(short.items()))
+            return (
+                f"fewer than {self.min_recordings} recordings per side ({sides}). The "
+                "safety margin is the spread between repeats of the same side, so it "
+                "has not been measured"
+            )
+        return None
+
+    @property
+    def ready(self) -> bool:
+        """Whether every side has at least :attr:`min_recordings` recordings."""
+        return self.not_ready_reason is None
 
 
 @dataclass(frozen=True)
@@ -81,6 +288,10 @@ class JointMap:
     j4_hold_deg:
         J4 is unmodelled and held here. The API wants four values; the model
         has three actuated joints.
+    coupled:
+        The measured J3(J2) envelope, checked on top of the boxes in
+        ``api_limits_deg``. ``None`` checks the boxes only, which is what
+        every map did before the envelope was measured.
     """
 
     names: tuple[str, ...]
@@ -90,6 +301,7 @@ class JointMap:
     api_limits_deg: Mapping[int, tuple[float, float]]
     vmax_deg_s: float = 120.0
     j4_hold_deg: float = 0.0
+    coupled: CoupledLimit | None = None
 
     def __post_init__(self) -> None:
         """Validate the shapes and make the arrays read-only.
@@ -119,6 +331,14 @@ class JointMap:
         missing = sorted(set(self.api_ids) - set(self.api_limits_deg))
         if missing:
             raise ValueError(f"api_limits_deg has no entry for API joints {missing}")
+        if self.coupled is not None:
+            absent = [
+                j
+                for j in (self.coupled.driver_api_id, self.coupled.limited_api_id)
+                if j not in self.api_ids
+            ]
+            if absent:
+                raise ValueError(f"the coupled limit names API joints {absent} this map lacks")
         signs.flags.writeable = False
         offsets.flags.writeable = False
         object.__setattr__(self, "names", tuple(self.names))
@@ -155,6 +375,94 @@ class JointMap:
         d = d[:, : self.n_joints]
         return np.asarray(np.deg2rad((d - self.offsets_deg) / self.signs), dtype=np.float64)
 
+    def _coupled_violations(self, api: Array) -> list[str]:
+        """Complaints about (N, 4) API degrees against :attr:`coupled`; [] if fine."""
+        c = self.coupled
+        if c is None:
+            return []
+        kd = self.api_ids.index(c.driver_api_id)
+        kl = self.api_ids.index(c.limited_api_id)
+        x, y = api[:, kd], api[:, kl]
+        lo, hi = c.bounds(x)
+        bad = ~((y >= lo - _TOL_DEG) & (y <= hi + _TOL_DEG))  # NaN bound -> bad
+        if not bad.any():
+            return []
+        i = int(np.flatnonzero(bad)[0])
+        d, lim = c.driver_api_id, c.limited_api_id
+        if np.isnan(lo[i]) or np.isnan(hi[i]):
+            first = f"no measured limit at J{d} = {x[i]:.2f} deg"
+        else:
+            first = (
+                f"J{lim} = {y[i]:.2f} deg outside [{lo[i]:.2f},{hi[i]:.2f}] "
+                f"at J{d} = {x[i]:.2f} deg"
+            )
+        return [
+            f"J{lim}/{self.names[kl]}: {int(bad.sum())} of {len(x)} setpoints outside the "
+            f"measured J{lim}(J{d}) envelope; first: {first} ({c.source or 'envelope'})"
+        ]
+
+    def check_setpoint(self, q_rad: npt.ArrayLike) -> Array:
+        """One (n,) model-radian setpoint -> (4,) API degrees, or ``ValueError``.
+
+        The per-setpoint guard every arm runs before touching its transport.
+        :meth:`validate` judges a whole trajectory before a run starts; this
+        judges the one value about to be sent, which is the only check a
+        command generated live (a keyboard jog) ever gets. Checks the
+        ``api_limits_deg`` box of every commanded joint, then :attr:`coupled`.
+        """
+        q = np.atleast_2d(np.asarray(q_rad, dtype=np.float64))
+        if q.shape[0] != 1:
+            raise ValueError(f"one setpoint expected, got {q.shape[0]} rows")
+        api = self.to_api_deg(q)
+        bad: list[str] = []
+        for k, jid in enumerate(self.api_ids):
+            lo, hi = self.api_limits_deg[jid]
+            v = float(api[0, k])
+            if not lo - _TOL_DEG <= v <= hi + _TOL_DEG:
+                bad.append(
+                    f"J{jid}/{self.names[k]} = {v:.2f} deg outside the API limit "
+                    f"[{lo:.1f},{hi:.1f}]"
+                )
+        bad += self._coupled_violations(api)
+        if bad:
+            raise ValueError("Setpoint out of range, nothing sent:\n  - " + "\n  - ".join(bad))
+        return np.asarray(api[0], dtype=np.float64)
+
+    def clamp_rad(self, q_rad: npt.ArrayLike) -> Array:
+        """Nearest setpoint, per joint, that :meth:`check_setpoint` accepts.
+
+        For a caller that generates commands live and must keep them legal --
+        the teleop demo clamps its jog target here, the way it already clamps
+        to ``ctrlrange``. Clips each joint to its ``api_limits_deg`` box, then
+        the driver joint into the envelope's measured span, then the limited
+        joint to the envelope's bounds at that driver angle. A point already
+        inside comes back unchanged. Same shape in and out: (n,) or (N, n)
+        model radians.
+
+        Raises ``ValueError`` if the driver lands in a gap of the envelope:
+        there is nothing measured to clamp to there.
+        """
+        one = np.ndim(q_rad) == 1
+        api = self.to_api_deg(q_rad)[:, : self.n_joints]
+        box_lo = np.array([self.api_limits_deg[j][0] for j in self.api_ids])
+        box_hi = np.array([self.api_limits_deg[j][1] for j in self.api_ids])
+        api = np.clip(api, box_lo, box_hi)
+        c = self.coupled
+        if c is not None:
+            kd = self.api_ids.index(c.driver_api_id)
+            kl = self.api_ids.index(c.limited_api_id)
+            span_lo, span_hi = c.driver_span_deg
+            api[:, kd] = np.clip(api[:, kd], max(span_lo, box_lo[kd]), min(span_hi, box_hi[kd]))
+            lo, hi = c.bounds(api[:, kd])
+            if np.any(np.isnan(lo) | np.isnan(hi)):
+                raise ValueError(
+                    f"J{c.driver_api_id} falls in a gap of the measured envelope; "
+                    "there is no limit to clamp to"
+                )
+            api[:, kl] = np.clip(api[:, kl], np.maximum(lo, box_lo[kl]), np.minimum(hi, box_hi[kl]))
+        q = self.to_model_rad(api)
+        return np.asarray(q[0] if one else q, dtype=np.float64)
+
     def validate(
         self,
         q_rad: npt.ArrayLike,
@@ -164,6 +472,10 @@ class JointMap:
         verbose: bool = True,
     ) -> Array:
         """Check positions against XML + API limits and, given ``t``, velocity.
+
+        With :attr:`coupled` set, every sample is also checked against the
+        measured J3(J2) envelope -- the one limit the per-joint boxes cannot
+        express.
 
         Was ``check_trajectory`` in the notebook. Raises ``ValueError`` before
         anything reaches the serial port, and returns the (N, 4) API-degree
@@ -219,6 +531,9 @@ class JointMap:
                     f"API limit [{lo_api:.1f},{hi_api:.1f}]"
                 )
 
+        coupled_bad = self._coupled_violations(api)
+        bad += coupled_bad
+
         qd: Array | None = None
         if t is not None:
             t_arr = np.asarray(t, dtype=np.float64)
@@ -234,7 +549,7 @@ class JointMap:
                     )
 
         if verbose:
-            self._print_table(rows, qd)
+            self._print_table(rows, qd, coupled_ok=not coupled_bad)
         if bad:
             raise ValueError("Trajectory out of range, nothing sent:\n  - " + "\n  - ".join(bad))
         return api
@@ -243,6 +558,8 @@ class JointMap:
         self,
         rows: list[tuple[int, str, float, float, float, float, float, float, bool, bool]],
         qd: Array | None,
+        *,
+        coupled_ok: bool = True,
     ) -> None:
         """The notebook's verdict table. Kept on a library call on purpose.
 
@@ -268,6 +585,13 @@ class JointMap:
             f"J4   {'-':<7}{'(not modelled)':>18}{'-':>18}"
             f"{f'[{j4_lo:7.1f},{j4_hi:7.1f}]':>18}{'-':>12}   held at {self.j4_hold_deg:.1f} deg"
         )
+        c = self.coupled
+        if c is not None:
+            src = Path(c.source).name if c.source else "envelope"
+            print(
+                f"  J{c.limited_api_id}(J{c.driver_api_id}) envelope from {src}: "
+                f"{'OK' if coupled_ok else 'OUT OF RANGE'}"
+            )
         if qd is None:
             print("  NOTE: without `t` speed was not checked. Pass the time axis.")
         else:
@@ -285,6 +609,12 @@ class ArmInterface(ABC):
     ``send`` must not block on a reply. The loop that calls it is also pacing
     the trajectory and draining sensors, so a round trip per setpoint caps the
     achievable rate -- see :class:`~erp.robot.mypalletizer.MyPalletizerArm`.
+
+    **Every implementation runs** :meth:`JointMap.check_setpoint` **in**
+    ``send`` **before touching its transport**, so an out-of-range setpoint
+    raises and nothing is queued or written. Each arm does it itself, and
+    ``test_robot.py`` runs the same rejection test over every arm, so one that
+    drops the call fails there.
     """
 
     name: str
@@ -292,7 +622,11 @@ class ArmInterface(ABC):
 
     @abstractmethod
     def send(self, q_rad: npt.ArrayLike, speed: int | None = None) -> None:
-        """Command one setpoint, given as (n,) model radians."""
+        """Command one setpoint, given as (n,) model radians.
+
+        Raises ``ValueError`` (from :meth:`JointMap.check_setpoint`) if it is
+        outside the map's limits, before anything is sent.
+        """
 
     @abstractmethod
     def read(self) -> Array | None:

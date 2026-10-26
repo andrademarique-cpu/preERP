@@ -52,7 +52,13 @@
                         <geom class="axis_z" /> <geom class="axis_z_tip" />
                     </frame>
                     <body name="link2" pos="0 0 0" quat="1 0 0 0">
-                        <joint type="hinge" name="link2" axis="0 0 -1" pos="0 0.13 -0.023999556" ref="1.57" range="0 1.05" damping="0.955"/>
+                        <!-- link2 (= J3 de la API) llega a valores NEGATIVOS: el tope inferior
+                             medido el 2026-10-21 va de ~-13 grados (J2 = 0) a ~-110 (J2 = 90),
+                             ver docs/j2j3_envelope_handoff.md. El piso es el limite de la API,
+                             -92 grados: mas abajo no se puede comandar. El tope real depende de
+                             link1 y un `range` es una caja por junta, asi que esa parte la impone
+                             la envolvente de JointMap (erp.robot.CoupledLimit), no este XML. -->
+                        <joint type="hinge" name="link2" axis="0 0 -1" pos="0 0.13 -0.023999556" ref="1.57" range="-1.6057 1.05" damping="0.955"/>
                         <geom mesh="link2_visual" name="link2_visual_geom" type="mesh" material="mat_link2" pos="0 0 0" quat="1 0 0 0" />
                         <inertial mass="0.247104" pos="0.004638108 0.098050313 0.000943384" fullinertia="6.06900e-4 1.77079e-4 6.50257e-4 5.97245e-5 1.68248e-6 -8.05481e-6" />
                         <frame name="link2_site_frame" pos="0.015  0.06 0.035" quat="1 0 0 0">
@@ -87,7 +93,9 @@
     <actuator>
         <position name="rot_servo"   joint="rot"   kp="10"  forcerange="-4.0 4.0" ctrlrange="-2.79 2.79"/>
         <position name="link1_servo" joint="link1" kp="80" forcerange="-7.0 7.0" ctrlrange="0 1.57"/>
-        <position name="link2_servo" joint="link2" kp="40" forcerange="-2.0 2.0" ctrlrange="0 1.04"/>
+        <!-- link2: -1.6055 rad = -91.99 grados, apenas ADENTRO del -92 de la API
+             (demo_teleop_real.py verifica al arrancar que ctrlrange cae dentro). -->
+        <position name="link2_servo" joint="link2" kp="40" forcerange="-2.0 2.0" ctrlrange="-1.6055 1.04"/>
     </actuator>
     <sensor>
         <accelerometer name="link1_acc" site="link1_site" />

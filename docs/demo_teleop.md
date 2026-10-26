@@ -577,9 +577,12 @@ una tecla es un paso (0.01 rad, ~150 golpes para cruzar un rango) o queda
 trabada y hace falta una tecla de freno. La demo traba; `X` limpia `held`, y `O`
 tambien (si no, vuelve al reposo y se va de nuevo sola en el mismo tick).
 
-Los rangos son **asimetricos** (`rot` ±2.79, `link1` 0..1.57, `link2` 0..1.04),
-asi que un paso simetrico desde cero se sale del rango en dos de los tres en el
-primer tick. Se recorta contra `model.actuator_ctrlrange`, leido del modelo.
+Los rangos son **asimetricos** (`rot` ±2.79, `link1` 0..1.57, `link2`
+-1.6055..1.04), asi que un paso simetrico desde cero se sale del rango en
+`link1` en el primer tick. Se recorta contra `model.actuator_ctrlrange`, leido
+del modelo. (Hasta el 2026-10-21 `link2` era 0..1.04 y tambien se salia; se
+abrio a negativos porque el J3 real llega ahi, ver
+`docs/j2j3_envelope_handoff.md`.)
 
 La 4a junta (`act`) esta acoplada por tendon con rango `[0, 0]`: **sigue, no se
 comanda**. Por eso "todas las juntas" son tres y no cuatro.
@@ -814,6 +817,41 @@ contra el `FakeMyCobot` de `test_robot.py`, la IMU real contra el `FakePort` de
   agregaba 411 ms; ahora se interpola a 500 Hz.
 - Rangos bajo el tope: planta acc -9.8..11.2 m/s², giro ±1.0 rad/s; estimado
   acc -9.7..12.2, giro ±0.6. De ahi ±1.5 rad/s para el giro.
+
+**La envolvente J3(J2)** (agregada 2026-10-21). La caja de `ctrlrange` deja
+link2 hasta 59.6 grados con cualquier link1, y el brazo real no llega: el tope
+superior de J3 cae a ~15 grados en J2 = 90 (`docs/j2j3_envelope_handoff.md`).
+El script carga `data/processed/j2j3_envelope.csv` en el `JointMap` del brazo
+(`CoupledLimit`) y recorta dos veces: el **objetivo**, en `set_target` (subir
+link1 con link2 arriba baja el objetivo de link2), y la **consigna**, despues
+de `slew_limit`. Esto último hace falta porque `slew_limit` mueve cada junta
+por su cuenta y el camino entre dos puntos de la envolvente puede salirse.
+Donde la tabla tiene pendiente local mayor que 1, el recorte podría pasar el
+tope de 0.5 rad/s; ahí link1 se queda quieto ese tick y solo baja link2.
+Además el `send` de cada brazo corre `JointMap.check_setpoint` y levanta si
+algo se escapa. Con `--arm real` la envolvente es obligatoria y tiene que
+tener dos grabaciones por lado, o no arranca (se revisa antes de pedir 'si').
+Con `--arm dry` se usa aunque no esté lista, y sin archivo se sigue con las
+cajas, avisando.
+
+Verificado sin hardware (reloj virtual, `--arm dry`, CSV del 2026-10-21):
+- **Barrido:** link2 sostenido arriba y después link1 de 0 a 90 grados sin
+  soltarlo.
+  - 134 consignas, todas dentro de la envolvente; la más cercana al tope a
+    0.000 grados.
+  - Tasa máxima 0.500 rad/s y 0 fallas.
+  - El freno de link1 actuó 4 veces.
+  - Final J2 = 89.95, J3 = 14.97, sobre el tope (14.97).
+- **Falsificación:** sin el recorte del demo, el `send` del brazo rechaza la
+  consigna en J2 = 43.9 (J3 = 59.59 contra un tope de 58.77), justo donde el
+  tope empieza a caer.
+- **`--arm real`:** con ese CSV (una grabación por lado) frena con el mensaje de
+  "no está lista" antes de la lista de chequeo, sin importar pymycobot.
+- **Con dos grabaciones por lado** (re-ajuste del mismo día):
+  - `--arm real` acepta la envolvente.
+  - El barrido de ida y vuelta da 212 consignas, todas adentro, 0 fallas y
+    0.500 rad/s de tasa máxima.
+  - En J2 = 89.95, J3 = 15.08, sobre el tope.
 
 **La primera vez sobre hardware**, en este orden: `--imu real` solo (~20 Hz,
 sesgo valido, `descartadas` 0, NIS finita); despues `--arm real --imu real`,

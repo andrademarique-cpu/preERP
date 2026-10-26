@@ -55,7 +55,11 @@ SEGURIDAD -- lo que hace el script y lo que NO:
     (0.5 rad/s por defecto, ~29 grados/s, contra 120 grados/s de spec) y las
     velocidades de jog tambien se recortan a ese tope. Cada consigna se recorta
     a `ctrlrange` del XML, que se verifica al arrancar que cae DENTRO de los
-    limites de la API: pymycobot no revisa NADA, esta es la unica guarda.
+    limites de la API, y despues a la ENVOLVENTE J3(J2) medida
+    (`data/processed/j2j3_envelope.csv`): con J2 alto, J3 no llega a 60 grados.
+    pymycobot no revisa NADA. `send` de cada brazo corre `check_setpoint` y
+    levanta si algo se escapa. Con el brazo real la envolvente es obligatoria y
+    tiene que tener dos grabaciones por lado; si no, no arranca.
   - A lo sumo 25 Hz de consignas (el techo medido; lo que sobra se encola en el
     firmware y ese es el atraso), solo si la consigna cambio, sin rafagas de
     recuperacion. Antes de cada envio una ultima guarda de rango y de paso.
@@ -95,6 +99,7 @@ visor y el chequeo del fantasma -- importados, no copiados.
 from __future__ import annotations
 
 import argparse
+import dataclasses
 import signal
 import sys
 import time
@@ -116,7 +121,7 @@ from erp.fusion import FilterRunner
 from erp.io.config import build_decoder, load_config
 from erp.io.log import MeasurementLog
 from erp.io.paths import repo_root, resolve_repo_path
-from erp.robot import ArmInterface, DryRunArm, JointMap, MyPalletizerArm
+from erp.robot import ArmInterface, CoupledLimit, DryRunArm, JointMap, MyPalletizerArm
 from erp.sensors import LiveSimSensor, SensorError, SerialIMUSensor
 from erp.sensors.clock import ArrivalClock
 from erp.sensors.mujoco import make_R, rows_of
@@ -148,6 +153,10 @@ JMAP = JointMap(
     vmax_deg_s=120.0,
     j4_hold_deg=0.0,
 )
+# La envolvente J3(J2) medida a mano (notebooks/Palletizer.ipynb, registro en
+# docs/j2j3_envelope_handoff.md). La caja de arriba deja J3 hasta 60 grados con
+# cualquier J2; el tope real cae a ~14 grados en J2 = 91.
+ENVELOPE_RELATIVE = ("data", "processed", "j2j3_envelope.csv")
 STREAM_RATE_HZ = 25.0   # techo medido de send (+ get_angles) en un puerto
 STREAM_SPEED = 100      # escala de firmware 1..100, NO grados/s; la del notebook
 HOMING_SPEED = 30
@@ -192,9 +201,10 @@ class _FnClock:
 def check_ctrlrange_inside_api(jmap: JointMap, ctrl_range: Any) -> None:
     """Falla si algun extremo de `ctrlrange` (rad) cae fuera de la API (grados).
 
-    Recortar a `ctrlrange` es la unica guarda de rango, asi que tiene que ser
-    la mas estricta de las dos. Hoy lo es con margen: rot +-159.9 dentro de
-    +-162, link1 0..90 dentro de -2..90, link2 0..59.6 dentro de -92..60.
+    `ctrlrange` es la caja que recorta las teclas (la envolvente J3(J2) va
+    despues), asi que tiene que caer dentro de la API. Hoy: rot +-159.9 dentro
+    de +-162, link1 0..90 dentro de -2..90, link2 -91.99..59.6 dentro de
+    -92..60 -- el piso de link2 esta a 0.01 grados del de la API a proposito.
     """
     for j, api_id in enumerate(jmap.api_ids):
         lo, hi = jmap.api_limits_deg[api_id]
@@ -205,6 +215,36 @@ def check_ctrlrange_inside_api(jmap: JointMap, ctrl_range: Any) -> None:
                     f"ctrlrange de {jmap.names[j]} llega a {deg:.2f} grados, fuera de"
                     f" la API [{lo}, {hi}]. Nada se manda."
                 )
+
+
+def jmap_with_envelope(real_arm: bool) -> JointMap:
+    """`JMAP` con la envolvente J3(J2) medida, o sin ella si no hay archivo.
+
+    Con el brazo real la envolvente es OBLIGATORIA y tiene que estar lista (dos
+    grabaciones por lado: el margen es la dispersion entre ellas). Se revisa
+    ACA, antes de la lista de chequeo, para no pedir 'si' y fallar despues;
+    `MyPalletizerArm` lo vuelve a revisar antes de abrir el puerto. En el
+    ensayo se usa aunque no este lista, y sin archivo se sigue solo con las
+    cajas de la API, avisando.
+    """
+    path = resolve_repo_path(*ENVELOPE_RELATIVE, must_exist=False)
+    if not path.exists():
+        if real_arm:
+            raise SystemExit(f"falta {path}: con el brazo real la envolvente J3(J2) es"
+                             " obligatoria. Correr el ajuste de notebooks/Palletizer.ipynb.")
+        print(f"AVISO: no esta {path.name}; el ensayo usa solo las cajas de la API.")
+        return JMAP
+    env = CoupledLimit.from_csv(path)
+    if not env.ready:
+        if real_arm:
+            raise SystemExit(f"la envolvente J3(J2) no esta lista para el brazo real:"
+                             f" {env.not_ready_reason}. Repetir las grabaciones"
+                             " (docs/j2j3_envelope_handoff.md). Nada se movio.")
+        print(f"AVISO: envolvente no lista para el brazo real ({env.not_ready_reason});"
+              " el ensayo la usa igual.")
+    lo, hi = env.driver_span_deg
+    print(f"envolvente J3(J2) de {path.name}: J2 medido en [{lo:.1f}, {hi:.1f}] grados")
+    return dataclasses.replace(JMAP, coupled=env)
 
 
 class TeleopReal:
@@ -238,6 +278,9 @@ class TeleopReal:
         if real_arm and slew_rad_s > SLEW_MAX_REAL:
             raise SystemExit(f"--slew {slew_rad_s} > {SLEW_MAX_REAL} rad/s con el brazo real")
         self.arm = arm
+        # El mapa del BRAZO, no el `JMAP` del modulo: es el que lleva la
+        # envolvente (si se cargo) y el que `send` revisa de verdad.
+        self.jmap = arm.jmap
         self.real_arm = bool(real_arm)
         self.clock = clock
         self._sleep = sleep
@@ -284,7 +327,7 @@ class TeleopReal:
         self.runner: FilterRunner | None = None
 
         self.ctrl_range = np.asarray(self.model.actuator_ctrlrange[:3], dtype=np.float64)
-        check_ctrlrange_inside_api(JMAP, self.ctrl_range)
+        check_ctrlrange_inside_api(self.jmap, self.ctrl_range)
         self.ctrl = self.q0.copy()
         self.target = self.q0.copy()
         # Con el brazo real se arranca en finura 3 (0.1 rad/s, pasos de 0.5 grados).
@@ -377,7 +420,9 @@ class TeleopReal:
         antes de que el brazo arranque y volver al instante. Por eso la llegada
         se verifica aparte, leyendo los angulos (`_wait_home`).
         """
-        api = JMAP.to_api_deg(self.q0)[0]
+        # `check_setpoint` y no `to_api_deg`: `sync_send_angles` va directo al
+        # transporte, sin pasar por `send`, asi que la guarda se corre aca.
+        api = self.jmap.check_setpoint(self.q0)
         print(f"homing a {api[:3].tolist()} grados, velocidad {HOMING_SPEED} ...")
         mc = getattr(self.arm, "mc", None)
         if mc is not None and hasattr(mc, "sync_send_angles"):
@@ -471,8 +516,12 @@ class TeleopReal:
         return base.NIVELES[self.level][1]
 
     def set_target(self, idx: int, value_rad: float) -> None:
+        """Objetivo de una junta, recortado a `ctrlrange` y despues a la
+        envolvente J3(J2). Subir link1 con link2 arriba BAJA el objetivo de
+        link2: lo que se mueve es el vector entero, no solo la junta `idx`."""
         lo, hi = self.ctrl_range[idx]
         self.target[idx] = float(np.clip(value_rad, lo, hi))
+        self.target[:] = self.jmap.clamp_rad(self.target)
 
     def nudge(self, idx: int, sign: float) -> None:
         self.set_target(idx, self.target[idx] + sign * np.deg2rad(self.step_deg))
@@ -503,8 +552,32 @@ class TeleopReal:
         self._t_jog = now
         for idx, sign in self.held.items():
             self.set_target(idx, self.target[idx] + sign * self.jog_rad_s * el)
-        self.ctrl[:] = slew_limit(self.ctrl, self.target, self.slew_rad_s * el)
+        step = self.slew_rad_s * el
+        nxt = slew_limit(self.ctrl, self.target, step)
+        self.ctrl[:] = self._inside_envelope(self.ctrl, nxt, step)
         self._ctrl_hist.append((now, self.ctrl.copy()))
+
+    def _inside_envelope(self, prev: Any, nxt: Any, step: float) -> Any:
+        """`nxt` dentro de la envolvente, sin pasar el tope de `step` por junta.
+
+        Hace falta aunque el objetivo ya este adentro: `slew_limit` mueve cada
+        junta por su cuenta, y el camino entre dos puntos de la envolvente
+        puede salirse (link1 llega antes y link2 todavia esta alto). Recortar
+        `nxt` lo arregla casi siempre, pero la tabla tiene pendientes locales
+        mayores que 1 (1.76 entre J2 = 56 y 59 grados), y ahi el recorte podria
+        mover link2 mas que `step` y hacer saltar `_guard`. En ese caso link1 se
+        queda donde estaba y solo se recorta link2: como `prev` ya esta adentro
+        y `nxt` esta a `step` de el, recortar hacia el intervalo de `prev` lo
+        acerca a `prev`. Ese paso siempre es posible.
+        """
+        c = self.jmap.clamp_rad(nxt)
+        env = self.jmap.coupled
+        if env is None or np.max(np.abs(c - prev)) <= step + 1e-12:
+            return c
+        held = np.array(nxt, dtype=np.float64)
+        kd = self.jmap.api_ids.index(env.driver_api_id)
+        held[kd] = prev[kd]
+        return self.jmap.clamp_rad(held)
 
     def send_if_due(self, now: float) -> None:
         """A lo sumo STREAM_RATE_HZ, solo si la consigna cambio, sin rafagas."""
@@ -642,7 +715,7 @@ class TeleopReal:
         t_s = np.array([t for t, _ in self.sent]) - self.t0
         q_s = np.array([q for _, q in self.sent]).reshape(-1, 3)
         np.savez(out / "commands.npz", t=t_s, q_rad=q_s,
-                 api_deg=JMAP.to_api_deg(q_s) if len(q_s) else np.empty((0, 4)))
+                 api_deg=self.jmap.to_api_deg(q_s) if len(q_s) else np.empty((0, 4)))
         lines = [
             f"arm: {self.arm.name}",
             f"imu: {self.imu_kind}  plant_delay_s: {self.plant_delay_s}"
@@ -792,17 +865,18 @@ def main(argv: list[str] | None = None) -> int:
     args = ap.parse_args(argv)
 
     real_arm = args.arm == "real"
+    if real_arm and not args.arm_port:
+        ap.error("--arm real necesita --arm-port (p.ej. COM6)")
+    jmap = jmap_with_envelope(real_arm)     # con el brazo real, antes de pedir 'si'
     if real_arm:
-        if not args.arm_port:
-            ap.error("--arm real necesita --arm-port (p.ej. COM6)")
         print(CHECKLIST)
         if input("  Escribi 'si' para seguir: ").strip().lower() != "si":
             print("cancelado, nada se movio")
             return 1
-        arm: ArmInterface = MyPalletizerArm(args.arm_port, JMAP, speed=STREAM_SPEED,
+        arm: ArmInterface = MyPalletizerArm(args.arm_port, jmap, speed=STREAM_SPEED,
                                             blocking_send=False)
     else:
-        arm = DryRunArm(JMAP, latency_s=cfg.imu.arm_lag_s)
+        arm = DryRunArm(jmap, latency_s=cfg.imu.arm_lag_s)
 
     with arm:
         teleop = TeleopReal(

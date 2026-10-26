@@ -1,0 +1,195 @@
+<!-- Generated using Fusion2Mujoco v1.0 -->
+<!-- https://github.com/jgillick/Fusion2Mujoco -->
+<!-- initialize in the home keyframe for the initial position-->
+<!-- COPIA de MyPalletizer260.xml + el adaptador del FSR en <body name="act">.
+     Es copia y no envoltorio porque un <include> no puede meter geoms ADENTRO
+     de un body incluido. Consecuencia: cualquier cambio al XML base (limites,
+     damping, keyframe) hay que repetirlo aca a mano.
+
+     Modelo de PLANTA solamente. `erp.sim.plant.blind_variant` sigue compilando
+     MyPalletizer260.xml, asi que el EKF no sabe que el adaptador existe.
+     Diferencias con el base: el body `fsr`, el site `efector` movido a la punta
+     de la cupula, y el sensor `fsr_force` (nsensordata 15 -> 16). -->
+<mujoco model="freshfile_mujoco">
+    <compiler angle="radian" />
+    <default>
+        <mesh scale="0.001 0.001 0.001" />
+        <geom contype="0" conaffinity="0" />
+        <include file="../axis_xyz.xml" />
+    </default>
+    <custom>
+        <numeric name="ground_offset" data="0.06052" />
+    </custom>
+    <asset>
+        <mesh name="base_link_visual" file="meshes\base_link\visual.stl" />
+        <mesh name="rot_visual" file="meshes\rot\visual.stl" />
+        <mesh name="link1_visual" file="meshes\link1\visual.stl" />
+        <mesh name="link2_visual" file="meshes\link2\visual.stl" />
+        <mesh name="act_visual" file="meshes\act\visual.stl" />
+        <!-- Un color por cuerpo. Los tonos se eligen fuera del rojo/verde/azul
+             saturados que usa la triada de ejes (../axis_xyz.xml) para que el
+             indicador de marco siga leyendose encima de la malla. -->
+        <material name="mat_base_link" rgba="0.25 0.28 0.33 1" specular="0.3" shininess="0.4" />
+        <material name="mat_rot"       rgba="0.95 0.55 0.10 1" specular="0.3" shininess="0.4" />
+        <material name="mat_link1"     rgba="0.10 0.65 0.70 1" specular="0.3" shininess="0.4" />
+        <material name="mat_link2"     rgba="0.60 0.30 0.80 1" specular="0.3" shininess="0.4" />
+        <material name="mat_act"       rgba="0.95 0.85 0.20 1" specular="0.3" shininess="0.4" />
+    </asset>
+    <worldbody>
+        <!-- Isometric fixed camera for full arm overview -->
+        <camera name="overview_cam" pos="0.5 -0.5 0.4" xyaxes="0.707 0.707 0 -0.408 0.408 0.816" fovy="45" />
+
+        <!-- Camera that automatically tracks the end-effector site -->
+        <camera name="tracking_cam" pos="0.4 -0.4 0.3" mode="targetbody" target="act" fovy="50" />
+
+        <body name="base_link" pos="0 0 0" quat="1 0 0 0">
+            <geom mesh="base_link_visual" name="base_link_visual_geom" type="mesh" material="mat_base_link" pos="0 0 0" quat="1 0 0 0" />
+            <inertial mass="0.306344" pos="0.000244623 0.000669050 0.022901575" fullinertia="4.76583e-4 4.13724e-4 6.10633e-4 5.34039e-6 -6.42171e-8 2.75100e-5" />
+            <body name="rot" pos="0 0.000005556 0.0735" quat="1 1 0 0">
+                <joint type="hinge" name="rot" axis="0 1 0" pos="0 0 0" ref="1.57" range="-2.79 2.79" damping="0.477"/>
+                <geom mesh="rot_visual" name="rot_visual_geom" type="mesh" material="mat_rot" pos="0 0 0" quat="1 0 0 0" />
+                <inertial mass="0.182552" pos="0.000004211 0.015996681 0.001519631" fullinertia="2.36233e-4 2.43474e-4 1.54210e-4 -3.23220e-8 -2.10390e-8 -9.27873e-6" />
+                <body name="link1" pos="0 0.041 -0.00025" quat="0 1 0 0">
+                    <joint type="hinge" name="link1" axis="0 0 -1" pos="0 0 -0.030249556" ref="-3.1415" range="0 1.57" damping="3.342"/>
+                    <geom mesh="link1_visual" name="link1_visual_geom" type="mesh" material="mat_link1" pos="0 0 0" quat="1 0 0 0" />
+                    <inertial mass="0.183389" pos="-0.005596236 0.045773016 -0.000411936" fullinertia="7.06920e-4 2.22166e-4 7.32050e-4 2.57367e-5 -9.80644e-7 -1.67577e-5" />
+                    <frame name="link1_site_frame" pos="-0.012 0.065 0.035" quat="1 0 0 0">
+                        <site name="link1_site" />
+                        <geom class="axis_o" />
+                        <geom class="axis_x" /> <geom class="axis_x_tip" />
+                        <geom class="axis_y" /> <geom class="axis_y_tip" />
+                        <geom class="axis_z" /> <geom class="axis_z_tip" />
+                    </frame>
+                    <body name="link2" pos="0 0 0" quat="1 0 0 0">
+                        <!-- link2 (= J3 de la API) llega a valores NEGATIVOS: el tope inferior
+                             medido el 2026-10-21 va de ~-13 grados (J2 = 0) a ~-110 (J2 = 90),
+                             ver docs/j2j3_envelope_handoff.md. El piso es el limite de la API,
+                             -92 grados: mas abajo no se puede comandar. El tope real depende de
+                             link1 y un `range` es una caja por junta, asi que esa parte la impone
+                             la envolvente de JointMap (erp.robot.CoupledLimit), no este XML. -->
+                        <joint type="hinge" name="link2" axis="0 0 -1" pos="0 0.13 -0.023999556" ref="1.57" range="-1.6057 1.05" damping="0.955"/>
+                        <geom mesh="link2_visual" name="link2_visual_geom" type="mesh" material="mat_link2" pos="0 0 0" quat="1 0 0 0" />
+                        <inertial mass="0.247104" pos="0.004638108 0.098050313 0.000943384" fullinertia="6.06900e-4 1.77079e-4 6.50257e-4 5.97245e-5 1.68248e-6 -8.05481e-6" />
+                        <frame name="link2_site_frame" pos="0.015  0.06 0.035" quat="1 0 0 0">
+                            <site name="link2_site" />
+                            <geom class="axis_o" />
+                            <geom class="axis_x" /> <geom class="axis_x_tip" />
+                            <geom class="axis_y" /> <geom class="axis_y_tip" />
+                            <geom class="axis_z" /> <geom class="axis_z_tip" />
+                        </frame>
+                        <body name="act" pos="0.027 -0.030711131 0.0005" quat="0 1 0 1">
+                            <joint type="hinge" name="act" axis="-1 0 0" pos="0.020500444 -0.030711131 -0.027" ref="1.57" />
+                            <geom mesh="act_visual" name="act_visual_geom" type="mesh" material="mat_act" pos="0 0 0" quat="1 0 0 0" />
+                            <inertial mass="0.0495256" pos="-0.000000054 -0.003980175 -0.025138034" fullinertia="2.29199e-5 1.77687e-5 1.66803e-5 0 0 6.86140e-7" />
+                            <geom name="ee_collider" type="cylinder"
+                                  fromto="0 0 0 0 0.003 -.05" size="0.018"
+                                  mass="0" contype="2" conaffinity="1"
+                                  rgba="0.95 0.35 0.10 0.55" group="3" />
+                            <!-- Adaptador del FSR: cilindro + esfera en la punta (MuJoCo no
+                                 tiene semiesfera; la mitad de la esfera queda adentro del
+                                 cilindro y la que sobresale es la cupula). Sigue el eje -z de
+                                 `act`, igual que el ee_collider, y arranca donde este termina.
+                                 SIN quat: el eje de la herramienta ya es -z de `act`.
+
+                                 Medidas PROVISORIAS: r = 16.5 mm, L = 20 mm, mass = 0 (no toca la
+                                 dinamica). Con masa real, poner un <inertial> en el body en vez
+                                 de mass en los geoms: cilindro y esfera se solapan y la masa del
+                                 solape se contaria dos veces.
+
+                                 Colision 2/1, la misma clase que el ee_collider: choca contra
+                                 el piso y los props (1/2), no contra los eslabones (0/0). -->
+                            <!-- CONTACTO RIGIDO, y no es cosmetico. Con el contacto por
+                                 defecto (solref 0.02 1) la cupula se hunde 14-22 mm en el piso
+                                 cuando los servos empujan: mas que su propia altura (16.5 mm),
+                                 asi que el borde del cilindro tambien toca, esos contactos caen
+                                 FUERA de fsr_pad y el <touch> mide solo una parte de la fuerza.
+                                 Ademas MuJoCo ubica el punto de contacto a mitad de la
+                                 penetracion, que es por que el contacto no parecia estar en la
+                                 punta.
+
+                                 solref NEGATIVO = rigidez y amortiguamiento directos. Medido
+                                 contra el piso, empujando de 0 a 55 N: -1e5/-1e3 penetra <= 1.8 mm,
+                                 estable y sin contactos en el cilindro. -3e5 ya rebota a dt = 2 ms
+                                 (la fuerza parpadea a 0); 0.004 1, el solref positivo mas rigido
+                                 que admite el paso, igual penetra 7-10 mm.
+
+                                 priority="1": sin ella MuJoCo PROMEDIA el solref de los dos geoms
+                                 del contacto, y promediar uno negativo con el 0.02 del piso no
+                                 significa nada. Con priority manda el del adaptador, entero. -->
+                            <body name="fsr" pos="0 0.003 -0.05">
+                                <geom name="fsr_cyl" type="cylinder" fromto="0 0 0  0 0 -0.020" size="0.0165"
+                                      mass="0" contype="2" conaffinity="1" rgba="0.20 0.20 0.22 1"
+                                      priority="1" solref="-1e5 -1e3" />
+                                <geom name="fsr_tip" type="sphere" pos="0 0 -0.020" size="0.0165"
+                                      mass="0" contype="2" conaffinity="1" rgba="0.20 0.20 0.22 1"
+                                      priority="1" solref="-1e5 -1e3" />
+                                <!-- Zona sensible del FSR: el <touch> suma la fuerza normal de
+                                     los contactos que caen ADENTRO de este site, y solo sobre
+                                     geoms de este body. Un poco mas grande que la cupula para
+                                     cubrirla entera. -->
+                                <site name="fsr_pad" type="sphere" pos="0 0 -0.020" size="0.0165" rgba="1 0 0 0.2" />
+                                <!-- El efector va en la punta de la cupula: 20 mm + 16.5 mm. -->
+                                <frame name="efector_frame" pos="0 0 -0.0365" quat="1 0 0 0">
+                                    <site name="efector" />
+                                    <geom class="axis_o" />
+                                    <geom class="axis_x" /> <geom class="axis_x_tip" />
+                                    <geom class="axis_y" /> <geom class="axis_y_tip" />
+                                    <geom class="axis_z" /> <geom class="axis_z_tip" />
+                                </frame>
+                            </body>
+                        </body>
+                    </body>
+                </body>
+            </body>
+        </body>
+    </worldbody>
+    
+    <actuator>
+        <position name="rot_servo"   joint="rot"   kp="10"  forcerange="-4.0 4.0" ctrlrange="-2.79 2.79"/>
+        <position name="link1_servo" joint="link1" kp="80" forcerange="-7.0 7.0" ctrlrange="0 1.57"/>
+        <!-- link2: -1.6055 rad = -91.99 grados, apenas ADENTRO del -92 de la API
+             (demo_teleop_real.py verifica al arrancar que ctrlrange cae dentro). -->
+        <position name="link2_servo" joint="link2" kp="40" forcerange="-2.0 2.0" ctrlrange="-1.6055 1.04"/>
+    </actuator>
+    <sensor>
+        <accelerometer name="link1_acc" site="link1_site" />
+        <accelerometer name="link2_acc" site="link2_site" />
+        <gyro name="link1_gyro" site="link1_site" />
+        <gyro name="link2_gyro" site="link2_site" />
+        <framepos name="efector_pos" objtype="site" objname="efector" />
+        <!-- AL FINAL a proposito: las filas 0-11 (IMUs) y 12-14 (efector) quedan
+             donde estaban; el FSR es la fila 15. -->
+        <touch name="fsr_force" site="fsr_pad" />
+    </sensor>
+
+    <equality>
+        <tendon name="mantener_vertical" tendon1="acople_paletizador"
+                polycoef="1.5707963 1 0 0 0"
+                solref="0.004 1" solimp="0.99 0.9999 0.001 0.5 2"/>
+    </equality>
+    <tendon>
+        <fixed name="acople_paletizador">
+            <joint joint="link1" coef="1"/>
+            <joint joint="link2" coef="1"/>
+            <joint joint="act" coef="1"/>
+        </fixed>
+    </tendon>
+    <!-- act = 1.5693, no 1.57: es el valor que satisface la igualdad de arriba
+         EXACTO (q1+q2+qa = L0 + a0 = 1.5693), asi el arranque no tiene un
+         empujon del solver en el primer paso. -->
+    <keyframe>
+        <key name="home" qpos="0 0 0 1.5693" qvel="0 0 0 0" ctrl="0 0 0" />
+    </keyframe>
+
+    <!-- Cielo y piso. Va ULTIMO a proposito: el escenario trae un
+         <body name="scenery"> y el orden de los cuerpos decide la numeracion de
+         los geoms, asi que puesto aca el piso queda con el ultimo id y no
+         corre ninguno de los del brazo. El detalle esta explicado en
+         ../scene.xml y lo afirma test_plant.py.
+
+         El cielo es decorado; el PISO NO. Lleva contype/conaffinity para que el
+         `ee_collider` apoye en vez de hundirse. El resto del brazo lo atraviesa
+         igual que antes. Verificado que la corrida dorada no lo toca: sus 1848
+         estados estimados dan ncon = 0. -->
+    <include file="../scene.xml"/>
+</mujoco>

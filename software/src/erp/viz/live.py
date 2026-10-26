@@ -26,7 +26,8 @@ stay within about +-15 m/s^2 and ``h(x_hat)`` reaches -30 on ``link2_acc_x``
 for a moment during a reversal, so +-20 shows every free motion and clips
 only that transient. With a prop, contact spikes reach +-60 and clip at the
 edge, which still shows where the impact happens. The joint limits cover
-``actuator_ctrlrange`` (rot +-2.79, link1 0..1.57, link2 0..1.04 rad).
+``actuator_ctrlrange`` (rot +-2.79, link1 0..1.57, link2 -1.6055..1.04 rad;
+link2 reaches negative angles since 2026-10-21).
 
 **Nothing here is subclassed from Qt, deliberately.** PyQt5 ships ``.pyi``
 stubs and pyqtgraph does not, and CI installs neither, so a Qt base class is

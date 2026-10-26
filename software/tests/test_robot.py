@@ -15,7 +15,7 @@ import numpy as np
 import pytest
 
 from erp.io.paths import resolve_repo_path
-from erp.robot import ArmInterface, DryRunArm, JointMap, MyPalletizerArm
+from erp.robot import ArmInterface, CoupledLimit, DryRunArm, JointMap, MyPalletizerArm
 from erp.trajectory import sine_sweep
 
 # ---------------------------------------------------------------- fixtures
@@ -290,22 +290,28 @@ def test_ranges_are_looked_up_by_name_not_by_position(model: Any) -> None:
     JointMap whose columns are in another order is a legitimate config, and it
     is where the two lookups part company:
 
-        column 0 is `link2`, whose XML range is [0.0, 60.2] deg
+        column 0 is `link1`, whose XML range is [0.0, 90.0] deg
         jnt_range[0] is  `rot`, whose XML range is [-159.9, 159.9] deg
 
-    A trajectory reaching -50 deg on that column sits inside rot's range and
-    inside J3's API limit of [-92, 60], and outside link2's. Positional lookup
+    A trajectory reaching -1.5 deg on that column sits inside rot's range and
+    inside J2's API limit of [-2, 90], and outside link1's. Positional lookup
     passes it; lookup by name rejects it.
+
+    This used `link2` at -50 deg until 2026-10-21, when link2's XML range was
+    widened to the API floor of -92 deg (J3 really does go negative, see
+    docs/j2j3_envelope_handoff.md). Since then no J3 value is outside link2's
+    range yet inside J3's API limit, so link2 can no longer tell the lookups
+    apart. link1's XML floor of 0 still sits 2 deg inside J2's API floor of -2.
     """
-    reordered = make_jmap(names=("link2", "link1", "rot"), api_ids=(3, 2, 1))
+    reordered = make_jmap(names=("link1", "rot", "link2"), api_ids=(2, 1, 3))
     t = np.linspace(0.0, 3.0, 1500)
     q = np.zeros((t.size, 3))
-    q[:, 0] = np.deg2rad(-50.0 * np.sin(2 * np.pi / 3.0 * t) ** 2)
+    q[:, 0] = np.deg2rad(-1.5 * np.sin(2 * np.pi / 3.0 * t) ** 2)
 
     # What the guard does now.
-    with pytest.raises(ValueError, match="J3/link2") as exc:
+    with pytest.raises(ValueError, match="J2/link1") as exc:
         reordered.validate(q, model, t, verbose=False)
-    assert "[0.0,60.2]" in str(exc.value)
+    assert "[0.0,90.0]" in str(exc.value)
 
     # And what the pre-P2 guard concluded on the same trajectory: nothing at
     # all. This is the whole of check_trajectory's position test, with the one
@@ -321,7 +327,7 @@ def test_ranges_are_looked_up_by_name_not_by_position(model: Any) -> None:
         if not (lo >= lo_api and hi <= hi_api):
             complaints.append(f"API {k}")
     qd = np.abs(np.gradient(np.rad2deg(q), t, axis=0)).max(axis=0)
-    assert qd.max() == pytest.approx(104.7, abs=0.5)  # under the 120 deg/s spec
+    assert qd.max() == pytest.approx(3.14, abs=0.05)  # far under the 120 deg/s spec
     assert complaints == [], (
         "positional lookup was supposed to wave this trajectory through, and "
         f"it did not: {complaints}. The falsification no longer falsifies."
@@ -461,3 +467,232 @@ def test_importing_the_package_does_not_need_pymycobot() -> None:
     import sys
 
     assert "pymycobot" not in sys.modules
+
+
+# ------------------------------------------- the J3(J2) envelope and its guard
+
+# A synthetic envelope with the measured shape (docs/j2j3_envelope_handoff.md):
+# the upper stop flat at 58 deg to J2 = 40, then falling 0.93 deg per deg; the
+# lower stop a straight line. Grid every 10 deg of J2 over [-10, 90].
+ENV_J2 = np.arange(-10.0, 91.0, 10.0)
+ENV_LO = -20.0 - 0.95 * ENV_J2
+ENV_HI = np.where(ENV_J2 <= 40.0, 58.0, 58.0 - 0.93 * (ENV_J2 - 40.0))
+TWO_EACH = {"max": ("a_max.csv", "b_max.csv"), "min": ("a_min.csv", "b_min.csv")}
+ONE_EACH = {"max": ("a_max.csv",), "min": ("a_min.csv",)}
+
+# J2 = 80 deg, J3 = 50 deg: inside every box (J3 <= 60) and above the envelope,
+# whose upper bound there is 58 - 0.93 * 40 = 20.8 deg. The case the boxes miss.
+OVER_THE_STOP = np.deg2rad([0.0, 80.0, 50.0])
+
+
+def make_envelope(**kw: Any) -> CoupledLimit:
+    return CoupledLimit(
+        driver_deg=kw.pop("driver_deg", ENV_J2),
+        lo_deg=kw.pop("lo_deg", ENV_LO),
+        hi_deg=kw.pop("hi_deg", ENV_HI),
+        recordings=kw.pop("recordings", TWO_EACH),
+        source=kw.pop("source", "synthetic"),
+        **kw,
+    )
+
+
+@pytest.fixture(scope="module")
+def jmap_env() -> JointMap:
+    return make_jmap(coupled=make_envelope())
+
+
+def _sent(arm: ArmInterface) -> list[Any]:
+    """What reached the transport (real arm) or the delay line (dry run)."""
+    if isinstance(arm, MyPalletizerArm):
+        return list(arm.mc.sent)  # type: ignore[attr-defined]
+    assert isinstance(arm, DryRunArm)
+    return list(arm._queue)
+
+
+@pytest.mark.parametrize("kind", sorted(ARMS))
+def test_every_arm_refuses_a_setpoint_over_the_stop(kind: str, jmap_env: JointMap) -> None:
+    """The guard lives in each arm's `send`; one suite proves both run it."""
+    arm = ARMS[kind](jmap_env)
+    with pytest.raises(ValueError, match=r"envelope.*J3 = 50\.00 deg outside"):
+        arm.send(OVER_THE_STOP)
+    assert _sent(arm) == [], "a rejected setpoint still reached the transport"
+
+
+@pytest.mark.parametrize("kind", sorted(ARMS))
+def test_without_the_envelope_the_same_setpoint_is_sent(kind: str, jmap: JointMap) -> None:
+    """The paired control: the boxes alone pass it, so the envelope rejected it."""
+    arm = ARMS[kind](jmap)
+    arm.send(OVER_THE_STOP)
+    assert len(_sent(arm)) == 1
+
+
+@pytest.mark.parametrize("kind", sorted(ARMS))
+def test_every_arm_refuses_a_setpoint_outside_the_box(kind: str, jmap: JointMap) -> None:
+    """`send` checked nothing before; J2 = 95 deg is past its API limit of 90."""
+    arm = ARMS[kind](jmap)
+    with pytest.raises(ValueError, match=r"J2/link1 = 95\.00 deg outside the API limit"):
+        arm.send(np.deg2rad([0.0, 95.0, 0.0]))
+    assert _sent(arm) == []
+
+
+def test_a_setpoint_inside_the_envelope_is_sent(jmap_env: JointMap) -> None:
+    mc = FakeMyCobot()
+    MyPalletizerArm(None, jmap_env, transport=mc).send(np.deg2rad([0.0, 80.0, 15.0]))
+    assert np.allclose(np.rad2deg(mc.sent[0][1]), [0.0, 80.0, 15.0, 0.0])
+
+
+def test_the_envelope_interpolates_and_never_extrapolates() -> None:
+    env = make_envelope()
+    lo, hi = env.bounds([40.0, 45.0, 80.0])
+    assert np.allclose(hi, [58.0, 58.0 - 0.93 * 5.0, 58.0 - 0.93 * 40.0])
+    assert np.allclose(lo, -20.0 - 0.95 * np.array([40.0, 45.0, 80.0]))
+    lo, hi = env.bounds([-10.5, 90.5])
+    assert np.all(np.isnan(lo)) and np.all(np.isnan(hi))
+    # What np.interp would have said just below the table: the first row's
+    # bounds, i.e. an unmeasured pose reading as permitted.
+    assert np.interp(-10.5, ENV_J2, ENV_HI) == pytest.approx(58.0)
+
+
+def test_a_gap_in_the_envelope_forbids_its_interval_only() -> None:
+    hi = ENV_HI.copy()
+    hi[5] = np.nan  # J2 = 40
+    env = make_envelope(hi_deg=hi)
+    _, b = env.bounds([30.0, 35.0, 45.0, 50.0])
+    assert b[0] == pytest.approx(58.0) and b[3] == pytest.approx(58.0 - 0.93 * 10.0)
+    assert np.isnan(b[1]) and np.isnan(b[2])
+    with pytest.raises(ValueError, match=r"no measured limit at J2 = 35\.00"):
+        make_jmap(coupled=env).check_setpoint(np.deg2rad([0.0, 35.0, 0.0]))
+
+
+def test_an_inverted_envelope_is_refused() -> None:
+    """What the swapped max/min recordings of 2026-10-21 exported: lo > hi."""
+    with pytest.raises(ValueError, match="inverted envelope"):
+        make_envelope(lo_deg=ENV_HI, hi_deg=ENV_LO)
+
+
+def test_a_malformed_envelope_is_refused() -> None:
+    with pytest.raises(ValueError, match="strictly increasing"):
+        make_envelope(driver_deg=ENV_J2[::-1])
+    with pytest.raises(ValueError, match="must match"):
+        make_envelope(lo_deg=ENV_LO[:-1])
+    with pytest.raises(ValueError, match="names API joints"):
+        make_jmap(coupled=make_envelope(driver_api_id=4))
+
+
+def test_the_envelope_cannot_be_mutated_in_place() -> None:
+    env = make_envelope()
+    with pytest.raises(ValueError, match="read-only"):
+        env.hi_deg[0] = 90.0
+    with pytest.raises(TypeError):
+        env.recordings["max"] = ()  # type: ignore[index]
+
+
+def _write_envelope_csv(path: Any, lo: np.ndarray, hi: np.ndarray, recordings: Any) -> None:
+    """The notebook's export format, byte for byte where it matters."""
+    columns = ["j2", "j3_min", "j3_max", "j3_min_seguro", "j3_max_seguro", "n_min", "n_max"]
+    header = "\n".join([
+        "Envolvente J2 -> J3 en grados API, generada por la prueba. NaN = no medido.",
+        f"max: {', '.join(recordings['max'])}",
+        f"min: {', '.join(recordings['min'])}",
+        "cuantil 0.9, ancho_bin 2.5, margen min 1.00 max 1.00",
+        ",".join(columns),
+    ])
+    n = np.full(len(ENV_J2), 10)
+    data = np.column_stack([ENV_J2, lo - 1.0, hi + 1.0, lo, hi, n, n])
+    np.savetxt(path, data, delimiter=",", header=header, fmt=["%.3f"] * 5 + ["%d"] * 2)
+
+
+def test_the_envelope_loads_from_the_notebook_csv(tmp_path: Any) -> None:
+    path = tmp_path / "j2j3_envelope.csv"
+    _write_envelope_csv(path, ENV_LO, ENV_HI, TWO_EACH)
+    env = CoupledLimit.from_csv(path)
+    # The margin-applied columns, not the raw stops beside them.
+    assert np.allclose(env.lo_deg, ENV_LO) and np.allclose(env.hi_deg, ENV_HI)
+    assert dict(env.recordings) == TWO_EACH
+    assert env.ready
+
+
+def test_an_inverted_csv_is_refused_at_load(tmp_path: Any) -> None:
+    path = tmp_path / "j2j3_envelope.csv"
+    _write_envelope_csv(path, ENV_HI, ENV_LO, TWO_EACH)
+    with pytest.raises(ValueError, match="inverted envelope"):
+        CoupledLimit.from_csv(path)
+
+
+def test_one_recording_per_side_is_not_ready() -> None:
+    env = make_envelope(recordings=ONE_EACH)
+    assert not env.ready
+    assert "fewer than 2 recordings per side" in str(env.not_ready_reason)
+    assert make_envelope(recordings={}).not_ready_reason is not None
+    assert make_envelope().ready
+
+
+def test_the_real_arm_refuses_an_unready_envelope_before_opening_a_port() -> None:
+    """A serial error here would mean pymycobot ran first; the port is never touched."""
+    import sys
+
+    unready = make_jmap(coupled=make_envelope(recordings=ONE_EACH))
+    with pytest.raises(ValueError, match="not ready to gate the real arm"):
+        MyPalletizerArm("COMX", unready)
+    with pytest.raises(ValueError, match="not ready to gate the real arm"):
+        MyPalletizerArm(None, unready, transport=FakeMyCobot())
+    assert "pymycobot" not in sys.modules
+
+
+def test_the_dry_run_accepts_an_unready_envelope() -> None:
+    unready = make_jmap(coupled=make_envelope(recordings=ONE_EACH))
+    arm = DryRunArm(unready, clock=FakeClock())
+    with pytest.raises(ValueError, match="envelope"):
+        arm.send(OVER_THE_STOP)
+
+
+def test_clamp_moves_an_outside_point_onto_the_envelope(jmap_env: JointMap) -> None:
+    q = jmap_env.clamp_rad(OVER_THE_STOP)
+    assert np.allclose(np.rad2deg(q), [0.0, 80.0, 58.0 - 0.93 * 40.0])
+    assert jmap_env.check_setpoint(q).shape == (4,)  # the guard accepts it
+    assert np.array_equal(jmap_env.clamp_rad(q), q)  # and clamping is idempotent
+
+
+def test_clamp_leaves_an_inside_point_alone(jmap_env: JointMap) -> None:
+    q = np.deg2rad([10.0, 30.0, 20.0])
+    assert np.allclose(jmap_env.clamp_rad(q), q, rtol=0, atol=1e-15)
+
+
+def test_clamp_brings_the_driver_into_the_measured_span() -> None:
+    """J2 = 95 deg is past both the API box and the table; J3 follows it down."""
+    env = make_envelope(driver_deg=ENV_J2[:-2], lo_deg=ENV_LO[:-2], hi_deg=ENV_HI[:-2])
+    jm = make_jmap(coupled=env)
+    q = jm.clamp_rad(np.deg2rad([[0.0, 95.0, 50.0], [0.0, -5.0, 0.0]]))
+    assert q.shape == (2, 3)
+    assert np.allclose(np.rad2deg(q[0]), [0.0, 70.0, 58.0 - 0.93 * 30.0])
+    assert np.allclose(np.rad2deg(q[1]), [0.0, -2.0, 0.0])  # the box, not the table
+
+
+@pytest.mark.mujoco
+def test_the_real_trajectory_passes_with_the_envelope(jmap_env: JointMap, model: Any) -> None:
+    t, q = sine_trajectory((30.0, 10.0, 20.0), 3.0)
+    assert jmap_env.validate(q, model, t, verbose=False).shape == (len(t), 4)
+
+
+@pytest.mark.mujoco
+def test_a_trajectory_over_the_stop_is_rejected(
+    jmap: JointMap, jmap_env: JointMap, model: Any
+) -> None:
+    """J2 to 80 and J3 to 50 together: every box passes it, the envelope does not.
+
+    Peak speed is 2*pi*40/3 = 84 deg/s, under the spec, so the envelope is the
+    only check that can fire -- which the plain map passing it confirms.
+    """
+    t, q = sine_trajectory((0.0, 40.0, 25.0), 3.0)
+    assert jmap.validate(q, model, t, verbose=False).shape == (len(t), 4)
+    with pytest.raises(ValueError, match=r"J3/link2: \d+ of \d+ setpoints outside the measured"):
+        jmap_env.validate(q, model, t, verbose=False)
+
+
+@pytest.mark.mujoco
+def test_the_verbose_table_reports_the_envelope(
+    jmap_env: JointMap, model: Any, capsys: pytest.CaptureFixture[str]
+) -> None:
+    t, q = sine_trajectory((30.0, 10.0, 20.0), 3.0)
+    jmap_env.validate(q, model, t)
+    assert "J3(J2) envelope from synthetic: OK" in capsys.readouterr().out
