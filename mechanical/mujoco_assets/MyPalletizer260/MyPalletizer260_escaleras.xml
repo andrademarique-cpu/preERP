@@ -1,0 +1,8 @@
+<!-- El brazo mas las dos escaleras REALES del banco (medidas). Modelo de PLANTA:
+     el filtro corre siempre sobre el brazo pelado. El por que de este archivo
+     esta explicado en MyPalletizer260_box.xml; la geometria, en
+     ../prop_escaleras_reales.xml. -->
+<mujoco model="palletizer_escaleras">
+  <include file="MyPalletizer260.xml"/>
+  <include file="../prop_escaleras_reales.xml"/>
+</mujoco>

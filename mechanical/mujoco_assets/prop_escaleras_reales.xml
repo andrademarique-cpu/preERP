@@ -1,0 +1,55 @@
+<!-- Prop: las DOS escaleras reales del banco de prueba, medidas el 2026-10-21.
+     Alternativo a prop_box.xml y prop_stair.xml -- se carga uno por vez, por el
+     modelo envoltorio MyPalletizer260/MyPalletizer260_escaleras.xml.
+
+     A diferencia de prop_stair.xml (una escalera DISENADA para la demo), esta
+     geometria sale de MEDIR el banco real:
+
+       - Base de cada peldano: 3 x 3 cm. Altura: 3 / 6 / 9 cm sobre el tablero
+         (medida con regla).
+       - Centro (x, y) de cada peldano: donde el MODELO pone el sitio `efector`
+         con los angulos medidos a mano sobre ese peldano, promedio de 5 tomas
+         (data/raw/stair_poses_promedio.csv, 2 escaleras x 3 peldanos x 5).
+         J1-J3 repitieron a <= 1 grado entre tomas.
+
+     La altura que el MODELO calcula con esos angulos es 29.2 / 61.2 / 91.1 mm
+     (A) y 28.9 / 60.4 / 91.2 mm (B), contra 30 / 60 / 90 de regla: el modelo y
+     el brazo coinciden a ~1 mm. Por eso la punta queda apenas hundida (<= 1 mm,
+     mas ~1 mm del borde del cilindro, que esta inclinado ~3.5 grados) cuando el
+     espejo reproduce esas mismas poses. Es error de medicion, no un choque.
+
+     NOMBRES A/B: los de la medicion del 2026-10-28 (con la punta del FSR),
+     que son los del recorrido planeado. La del 2026-10-21 los tenia AL REVES
+     -- mismas escaleras, nombres cambiados --, asi que en
+     data/raw/stair_poses_promedio.csv (sin fecha) "A" es esta "B" y viceversa.
+     Las posiciones salen de esa primera medicion porque su altura quedo validada
+     contra la regla a ~1 mm; la del 10-28 cae a 3-10 mm de estos centros.
+
+     Ejes: los bloques van alineados con x/y del mundo (la base del brazo), no
+     girados. No se midio su orientacion real; con base de 3 x 3 cm y un util de
+     3.6 cm de diametro casi no cambia el contacto.
+
+     contype=1 / conaffinity=2, igual que los otros props y el piso: chocan con
+     el `ee_collider` (contype=2 / conaffinity=1) y con nada mas del brazo.
+     Estaticos (sin juntas) y dentro de un <body>, por las razones escritas en
+     prop_box.xml: no agregan estado ni corren la numeracion de los geoms. -->
+<mujoco model="prop_escaleras_reales">
+  <worldbody>
+    <body name="escaleras_reales">
+      <!-- Escalera A (J1 positivo, x < 0) -->
+      <geom name="esc_A1" type="box" pos="-0.1197 0.0917 0.015" size="0.015 0.015 0.015"
+            mass="0" contype="1" conaffinity="2" rgba="0.30 0.55 0.85 1"/>
+      <geom name="esc_A2" type="box" pos="-0.1264 0.1616 0.030" size="0.015 0.015 0.030"
+            mass="0" contype="1" conaffinity="2" rgba="0.25 0.48 0.78 1"/>
+      <geom name="esc_A3" type="box" pos="-0.1291 0.2123 0.045" size="0.015 0.015 0.045"
+            mass="0" contype="1" conaffinity="2" rgba="0.20 0.40 0.70 1"/>
+      <!-- Escalera B (J1 negativo, x > 0) -->
+      <geom name="esc_B1" type="box" pos="0.1074 0.1050 0.015" size="0.015 0.015 0.015"
+            mass="0" contype="1" conaffinity="2" rgba="0.85 0.55 0.30 1"/>
+      <geom name="esc_B2" type="box" pos="0.1343 0.1750 0.030" size="0.015 0.015 0.030"
+            mass="0" contype="1" conaffinity="2" rgba="0.78 0.48 0.25 1"/>
+      <geom name="esc_B3" type="box" pos="0.0988 0.2248 0.045" size="0.015 0.015 0.045"
+            mass="0" contype="1" conaffinity="2" rgba="0.70 0.40 0.20 1"/>
+    </body>
+  </worldbody>
+</mujoco>

@@ -91,7 +91,7 @@
                                  `act`, igual que el ee_collider, y arranca donde este termina.
                                  SIN quat: el eje de la herramienta ya es -z de `act`.
 
-                                 Medidas PROVISORIAS: r = 16.5 mm, L = 20 mm, mass = 0 (no toca la
+                                 Medidas: r = 16.5 mm (provisoria), L = 18.6 mm, mass = 0 (no toca la
                                  dinamica). Con masa real, poner un <inertial> en el body en vez
                                  de mass en los geoms: cilindro y esfera se solapan y la masa del
                                  solape se contaria dos veces.
@@ -117,19 +117,25 @@
                                  del contacto, y promediar uno negativo con el 0.02 del piso no
                                  significa nada. Con priority manda el del adaptador, entero. -->
                             <body name="fsr" pos="0 0.003 -0.05">
-                                <geom name="fsr_cyl" type="cylinder" fromto="0 0 0  0 0 -0.020" size="0.0165"
+                                <geom name="fsr_cyl" type="cylinder" fromto="0 0 0  0 0 -0.0186" size="0.0165"
                                       mass="0" contype="2" conaffinity="1" rgba="0.20 0.20 0.22 1"
                                       priority="1" solref="-1e5 -1e3" />
-                                <geom name="fsr_tip" type="sphere" pos="0 0 -0.020" size="0.0165"
+                                <geom name="fsr_tip" type="sphere" pos="0 0 -0.0186" size="0.0165"
                                       mass="0" contype="2" conaffinity="1" rgba="0.20 0.20 0.22 1"
                                       priority="1" solref="-1e5 -1e3" />
                                 <!-- Zona sensible del FSR: el <touch> suma la fuerza normal de
                                      los contactos que caen ADENTRO de este site, y solo sobre
                                      geoms de este body. Un poco mas grande que la cupula para
                                      cubrirla entera. -->
-                                <site name="fsr_pad" type="sphere" pos="0 0 -0.020" size="0.0165" rgba="1 0 0 0.2" />
-                                <!-- El efector va en la punta de la cupula: 20 mm + 16.5 mm. -->
-                                <frame name="efector_frame" pos="0 0 -0.0365" quat="1 0 0 0">
+                                <site name="fsr_pad" type="sphere" pos="0 0 -0.0186" size="0.0165" rgba="1 0 0 0.2" />
+                                <!-- El efector va en la punta de la cupula: 18.6 mm + 16.5 mm = 35.1 mm.
+                                     El LARGO TOTAL se midio con regla el 2026-10-28, cupula sin
+                                     apretar: 35.1 mm contra los 36.5 provisorios (L era 20 mm).
+                                     Se corrigio acortando el cilindro y dejando el radio, que no
+                                     se midio. Con las poses del 10-28 la cupula del modelo
+                                     entraba 2.8-6.2 mm en cada peldano: 1.4 mm era este largo y
+                                     el resto la silicona aplastada al apretar el FSR. -->
+                                <frame name="efector_frame" pos="0 0 -0.0351" quat="1 0 0 0">
                                     <site name="efector" />
                                     <geom class="axis_o" />
                                     <geom class="axis_x" /> <geom class="axis_x_tip" />
