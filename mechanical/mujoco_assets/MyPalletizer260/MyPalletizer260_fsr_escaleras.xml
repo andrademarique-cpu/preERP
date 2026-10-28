@@ -1,0 +1,20 @@
+<!-- El brazo CON el adaptador del FSR (punta de cupula) mas las dos escaleras
+     reales del banco. Modelo de PLANTA: el filtro corre siempre sobre el brazo
+     pelado.
+
+     Se puede incluir MyPalletizer260_fsr.xml entero (aunque ese archivo es una
+     COPIA del base y no un envoltorio) porque los bloques van en <worldbody>,
+     no adentro de un body del brazo.
+
+     Los bloques NO cambian con la punta: son el banco fisico. Sus (x, y) salen
+     de poses medidas SIN el adaptador, y el eje del adaptador es el mismo que el
+     del efector viejo (`fsr` arranca en pos="0 0.003 -0.05", donde estaba el
+     sitio `efector`). Medido con los mismos angulos: la punta de la cupula cae
+     en el MISMO (x, y) al 0.1 mm y 36.5 mm mas abajo, porque el paralelogramo
+     mantiene `act` vertical. Lo que cambia son los ANGULOS para llegar al mismo
+     peldano: con los viejos, la cupula quedaria 3.65 cm adentro de cada bloque
+     (y en el peldano 1, debajo del tablero). Hay que re-medirlos. -->
+<mujoco model="palletizer_fsr_escaleras">
+  <include file="MyPalletizer260_fsr.xml"/>
+  <include file="../prop_escaleras_reales.xml"/>
+</mujoco>
