@@ -99,6 +99,8 @@ PROP_MODELS = {
     "none": XML_RELATIVE,
     "box": XML_RELATIVE.with_name("MyPalletizer260_box.xml"),
     "stair": XML_RELATIVE.with_name("MyPalletizer260_stair.xml"),
+    # Las dos escaleras REALES del banco, medidas (prop_escaleras_reales.xml).
+    "escaleras": XML_RELATIVE.with_name("MyPalletizer260_escaleras.xml"),
 }
 
 # Identicos a los de `make_golden_run.py` y `demo_three_way.py`: las tres corridas

@@ -19,7 +19,7 @@ from __future__ import annotations
 import numpy as np
 import pytest
 
-from erp.trajectory import resample, sine_sweep, slew_limit
+from erp.trajectory import clamped_cubic_spline, resample, sine_sweep, slew_limit
 
 # The notebook's knobs (cell 3) and the golden run's (make_golden_run.py).
 PERIODO_S = 3
@@ -288,3 +288,97 @@ def test_slew_limit_refuses_nonsense() -> None:
         slew_limit([0.0], [1.0], -0.1)
     with pytest.raises(ValueError, match="max_step"):
         slew_limit([0.0], [1.0], np.nan)
+
+
+# --- clamped_cubic_spline -----------------------------------------------------
+#
+# Waypoints shaped like a lift / traverse / descend move between two stair
+# steps: three joints, uneven knot spacing, a direction change in each joint.
+SPLINE_T = np.array([0.0, 0.6, 1.9, 2.5])
+SPLINE_Q = np.deg2rad(np.array([
+    [54.0, 42.6, 34.7],
+    [54.0, 30.0, 10.0],
+    [39.6, 28.0, -5.0],
+    [39.6, 40.4, 8.5],
+]))
+
+
+def _jumps_at_knots(fn, order):
+    """Largest one-sided mismatch of the `order`-th derivative across interior knots.
+
+    Finite differences on each side of every interior knot, so it judges the
+    curve the function actually returns rather than its formula.
+    """
+    eps = 1e-6
+    worst = 0.0
+    for tk in SPLINE_T[1:-1]:
+        left = fn(np.array([tk - 2 * eps, tk - eps, tk]))
+        right = fn(np.array([tk, tk + eps, tk + 2 * eps]))
+        if order == 1:
+            dl = (left[2] - left[1]) / eps
+            dr = (right[1] - right[0]) / eps
+        else:
+            dl = (left[2] - 2 * left[1] + left[0]) / eps**2
+            dr = (right[2] - 2 * right[1] + right[0]) / eps**2
+        worst = max(worst, float(np.max(np.abs(dl - dr))))
+    return worst
+
+
+def _spline_q(t):
+    return clamped_cubic_spline(SPLINE_T, SPLINE_Q, t)[0]
+
+
+def _linear_q(t):
+    """The broken variant: straight lines between waypoints (np.interp)."""
+    return np.column_stack([np.interp(t, SPLINE_T, SPLINE_Q[:, k]) for k in range(3)])
+
+
+def test_spline_passes_through_every_knot():
+    q, _ = clamped_cubic_spline(SPLINE_T, SPLINE_Q, SPLINE_T)
+    np.testing.assert_allclose(q, SPLINE_Q, atol=1e-12)
+
+
+def test_spline_starts_and_ends_at_rest_by_default():
+    _, qd = clamped_cubic_spline(SPLINE_T, SPLINE_Q, SPLINE_T[[0, -1]])
+    np.testing.assert_allclose(qd, 0.0, atol=1e-12)
+
+
+def test_spline_honours_given_end_velocities():
+    v0, v1 = np.array([0.1, -0.2, 0.3]), np.array([-0.4, 0.0, 0.5])
+    _, qd = clamped_cubic_spline(SPLINE_T, SPLINE_Q, SPLINE_T[[0, -1]], v0, v1)
+    np.testing.assert_allclose(qd, [v0, v1], atol=1e-12)
+
+
+def test_spline_velocity_matches_the_derivative_of_its_position():
+    t = np.linspace(0.05, 2.45, 50)
+    eps = 1e-6
+    _, qd = clamped_cubic_spline(SPLINE_T, SPLINE_Q, t)
+    num = (_spline_q(t + eps) - _spline_q(t - eps)) / (2 * eps)
+    np.testing.assert_allclose(qd, num, atol=1e-6)
+
+
+def test_spline_has_continuous_velocity_and_acceleration_at_the_knots():
+    # rad/s and rad/s^2; the finite differences carry ~1e-3 of noise at eps=1e-6.
+    assert _jumps_at_knots(_spline_q, 1) < 1e-4
+    assert _jumps_at_knots(_spline_q, 2) < 1e-1
+
+
+def test_linear_waypoints_fail_the_continuity_check():
+    """Falsification: the check above can fail. Straight segments step in velocity."""
+    assert _jumps_at_knots(_linear_q, 1) > 0.1
+
+
+def test_two_knot_spline_is_the_rest_to_rest_cubic():
+    # With two knots and zero end velocities the clamped spline is the
+    # classic 3s^2 - 2s^3 ease: it reaches the midpoint at the mid time.
+    q, _ = clamped_cubic_spline([0.0, 2.0], [[0.0], [1.0]], [1.0])
+    np.testing.assert_allclose(q, [[0.5]], atol=1e-12)
+
+
+def test_spline_rejects_bad_knots():
+    with pytest.raises(ValueError, match="strictly increasing"):
+        clamped_cubic_spline([0.0, 1.0, 1.0], np.zeros((3, 2)), [0.5])
+    with pytest.raises(ValueError, match="at least 2"):
+        clamped_cubic_spline([0.0], np.zeros((1, 2)), [0.0])
+    with pytest.raises(ValueError, match="q_knots"):
+        clamped_cubic_spline([0.0, 1.0], np.zeros((3, 2)), [0.5])

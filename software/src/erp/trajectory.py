@@ -27,7 +27,7 @@ import numpy.typing as npt
 
 from erp.core.types import Array
 
-__all__ = ["resample", "sine_sweep", "slew_limit"]
+__all__ = ["clamped_cubic_spline", "resample", "sine_sweep", "slew_limit"]
 
 
 def sine_sweep(
@@ -99,6 +99,91 @@ def sine_sweep(
         np.asarray(q, dtype=np.float64),
         np.asarray(qd, dtype=np.float64),
     )
+
+
+def clamped_cubic_spline(
+    t_knots: npt.ArrayLike,
+    q_knots: npt.ArrayLike,
+    t: npt.ArrayLike,
+    v_start: npt.ArrayLike | None = None,
+    v_end: npt.ArrayLike | None = None,
+) -> tuple[Array, Array]:
+    """Cubic spline through ``(t_knots, q_knots)`` with the end velocities fixed.
+
+    One cubic per interval, continuous in position, velocity **and**
+    acceleration at every interior knot (C2), passing exactly through each
+    knot. The two missing conditions are the velocities at the first and last
+    knot -- "clamped" -- which default to zero: a move that starts and ends at
+    rest. That is the property that matters on the arm. A natural spline
+    (zero *acceleration* at the ends) leaves the endpoints with whatever
+    velocity falls out of the fit, i.e. a step in commanded speed where the
+    move begins and where it stops.
+
+    Why not ``np.interp`` between waypoints: piecewise-linear joint motion has
+    a velocity step at every waypoint, and a position servo turns a velocity
+    step into a jerk. ``scipy.interpolate.CubicSpline(bc_type="clamped")`` is
+    the same object; scipy is not a dependency (dropped at P0), and the
+    tridiagonal system here is a few knots wide.
+
+    Parameters
+    ----------
+    t_knots:
+        (K,) knot times, s, strictly increasing, K >= 2.
+    q_knots:
+        (K, n) joint positions at the knots, any consistent unit (model
+        radians on the command path).
+    t:
+        (N,) times to evaluate at, s. Outside ``[t_knots[0], t_knots[-1]]``
+        the end cubic is extrapolated -- callers sample inside.
+    v_start, v_end:
+        (n,) velocities at the first and last knot, unit/s. Default zeros.
+
+    Returns
+    -------
+    (q, qd):
+        (N, n) position and (N, n) velocity, unit and unit/s.
+    """
+    tk = np.asarray(t_knots, dtype=np.float64)
+    qk = np.asarray(q_knots, dtype=np.float64)
+    tt = np.asarray(t, dtype=np.float64)
+    if tk.ndim != 1 or len(tk) < 2:
+        raise ValueError(f"t_knots must be 1-D with at least 2 knots, got {tk.shape}")
+    if qk.ndim == 1:
+        qk = qk[:, None]
+    if qk.ndim != 2 or len(qk) != len(tk):
+        raise ValueError(f"q_knots must be (len(t_knots), n); got {qk.shape} for {tk.shape}")
+    h = np.diff(tk)
+    if np.any(h <= 0.0):
+        raise ValueError("t_knots must be strictly increasing")
+    n = qk.shape[1]
+    v0 = np.zeros(n) if v_start is None else np.broadcast_to(np.asarray(v_start, float), (n,))
+    v1 = np.zeros(n) if v_end is None else np.broadcast_to(np.asarray(v_end, float), (n,))
+
+    # Second derivatives M at the knots: the standard clamped system,
+    # tridiagonal, solved densely because K is a handful of waypoints.
+    k = len(tk)
+    a = np.zeros((k, k))
+    rhs = np.zeros((k, n))
+    slope = np.diff(qk, axis=0) / h[:, None]
+    a[0, 0], a[0, 1] = 2.0 * h[0], h[0]
+    rhs[0] = 6.0 * (slope[0] - v0)
+    for i in range(1, k - 1):
+        a[i, i - 1], a[i, i], a[i, i + 1] = h[i - 1], 2.0 * (h[i - 1] + h[i]), h[i]
+        rhs[i] = 6.0 * (slope[i] - slope[i - 1])
+    a[-1, -2], a[-1, -1] = h[-1], 2.0 * h[-1]
+    rhs[-1] = 6.0 * (v1 - slope[-1])
+    m = np.linalg.solve(a, rhs)
+
+    seg = np.clip(np.searchsorted(tk, tt, side="right") - 1, 0, k - 2)
+    hi = h[seg][:, None]
+    lo_gap = (tk[seg + 1] - tt)[:, None]  # time to the right knot
+    hi_gap = (tt - tk[seg])[:, None]  # time since the left knot
+    m0, m1, y0, y1 = m[seg], m[seg + 1], qk[seg], qk[seg + 1]
+    c0 = y0 / hi - m0 * hi / 6.0
+    c1 = y1 / hi - m1 * hi / 6.0
+    q = (m0 * lo_gap**3 + m1 * hi_gap**3) / (6.0 * hi) + c0 * lo_gap + c1 * hi_gap
+    qd = (-m0 * lo_gap**2 + m1 * hi_gap**2) / (2.0 * hi) - c0 + c1
+    return np.asarray(q, dtype=np.float64), np.asarray(qd, dtype=np.float64)
 
 
 def resample(t: npt.ArrayLike, q: npt.ArrayLike, rate_hz: float) -> tuple[Array, Array]:
