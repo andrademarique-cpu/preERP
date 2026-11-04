@@ -31,7 +31,7 @@ from typing import Protocol
 
 from erp.core.types import Array
 
-__all__ = ["DiscreteDynamics"]
+__all__ = ["ContactGeometry", "DiscreteDynamics"]
 
 
 class DiscreteDynamics(Protocol):
@@ -66,5 +66,32 @@ class DiscreteDynamics(Protocol):
 
         Devuelve TODOS los canales. Elegir cuales se usan es trabajo de quien
         llama, con las `rows` de la `Measurement`.
+        """
+        ...
+
+
+class ContactGeometry(Protocol):
+    """Distancia CON SIGNO de la herramienta al solido conocido mas cercano.
+
+    Es lo que convierte un sensor de contacto binario (el FSR: toca / no toca) en
+    algo que un EKF puede usar: una medicion escalar `d(x)` con su jacobiana. El
+    contacto entra por la MEDICION y no por la dinamica a proposito -- medido con
+    `scripts/medir_penetracion.py`: con el piso solido adentro del modelo ciego,
+    el estimado se queda pegado en el piso al levantar (5.97 mm, 69.5 sigma) y
+    J1 queda corrida 6.6 grados para siempre; con la dinamica sin contacto, no.
+
+    Igual que `DiscreteDynamics`: el valor y su jacobiana salen en PAR, del mismo
+    punto, y nada de esto sabe de mujoco. La implementacion con geometria real es
+    `erp.sim.dynamics.MujocoContactGeometry`.
+    """
+
+    nx: int
+    """Dimension del estado, la misma que la de la dinamica del filtro."""
+
+    def distance(self, x: Array) -> tuple[float, Array]:
+        """`(d, D)`: distancia en m (NEGATIVA adentro del solido) y dd/dx `(nx,)`.
+
+        Marco mundo. `D` es cero en los bloques de velocidad y activacion: la
+        distancia depende solo de la pose.
         """
         ...

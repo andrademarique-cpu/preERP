@@ -6,7 +6,7 @@ Este paquete se importa con numpy y nada mas. La implementacion de
 puede importarlo: es lo que permite testear el EKF sin mujoco cargado.
 """
 
-from erp.models.base import DiscreteDynamics
+from erp.models.base import ContactGeometry, DiscreteDynamics
 from erp.models.linear import LinearDynamics, affine_predict
 
-__all__ = ["DiscreteDynamics", "LinearDynamics", "affine_predict"]
+__all__ = ["ContactGeometry", "DiscreteDynamics", "LinearDynamics", "affine_predict"]

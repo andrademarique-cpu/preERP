@@ -30,6 +30,7 @@ MjData = Any
 
 __all__ = [
     "blind_variant",
+    "distancia_con_jacobiana",
     "distancias",
     "geoms_por_clase",
     "load_model",
@@ -182,6 +183,58 @@ def distancias(
                 n = float(np.linalg.norm(v))
                 normal[k] = np.sign(d) * v / n if n > 0.0 else 0.0
     return np.asarray(dist, dtype=np.float64), np.asarray(normal, dtype=np.float64)
+
+
+def distancia_con_jacobiana(
+    model: MjModel,
+    data: MjData,
+    x: Array,
+    herramienta: IntArray,
+    obstaculos: IntArray,
+    dist_max: float = 0.5,
+) -> tuple[float, Array]:
+    """`(d, D)`: la distancia con signo MINIMA herramienta-obstaculo y dd/dx.
+
+    El escalar que usa `erp.estimators.EKFFSR`: el minimo sobre todos los pares
+    de `distancias`. `x` es el estado del FILTRO `[qpos[:nv], qvel, act]`, y
+    `D` sale de su largo, no del de `model`: el mapa suele ser el modelo de
+    planta (na = 0) y el filtro el ciego (na = 3). Solo importa la pose.
+
+    La jacobiana es ANALITICA, no por diferencias finitas: d no es suave donde
+    cambia el obstaculo mas cercano, y una diferencia finita a caballo de ese
+    cambio da cualquier cosa. Con n la normal hacia afuera del obstaculo y Jp la
+    jacobiana de traslacion del punto testigo en la herramienta (`mj_jac`),
+    `dd/dq = n^T Jp`; velocidad y activacion no mueven la distancia.
+
+    `dist_max` grande (0.5 m) a proposito: mas lejos `mj_geomDistance` satura,
+    D sale cero y una lectura ON lejos de la superficie no corregiria nada.
+    `data` tiene que ser un MjData PROPIO; escribe su `qpos`.
+
+    -> d (m, negativa adentro);  D (nx,) m por unidad de estado, marco mundo
+    """
+    nv = int(model.nv)
+    xa = np.asarray(x, dtype=np.float64)
+    nx = xa.size
+    data.qpos[:nv] = xa[:nv]
+    mj.mj_kinematics(model, data)
+    mj.mj_comPos(model, data)          # cdof y subtree_com, que mj_jac necesita
+    mejor, punto, normal, cuerpo = float(dist_max), np.zeros(3), np.zeros(3), -1
+    fromto = np.zeros(6)
+    for g_obs in obstaculos:
+        for g in herramienta:
+            d = float(mj.mj_geomDistance(model, data, int(g), int(g_obs), float(dist_max), fromto))
+            if d < mejor:
+                v = fromto[:3] - fromto[3:]
+                n = float(np.linalg.norm(v))
+                mejor, punto = d, fromto[:3].copy()
+                normal = np.sign(d) * v / n if n > 0.0 else np.zeros(3)
+                cuerpo = int(model.geom_bodyid[int(g)])
+    D = np.zeros(nx)
+    if cuerpo >= 0:
+        jacp = np.zeros((3, nv))
+        mj.mj_jac(model, data, jacp, None, punto, cuerpo)
+        D[:nv] = normal @ jacp
+    return float(mejor), np.asarray(D, dtype=np.float64)
 
 
 def warmup_to_rest(model: MjModel, data: MjData, q_cmd: Array, warmup_steps: int = 100) -> Array:

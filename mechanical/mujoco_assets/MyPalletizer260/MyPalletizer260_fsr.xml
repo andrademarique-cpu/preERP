@@ -6,8 +6,14 @@
      de un body incluido. Consecuencia: cualquier cambio al XML base (limites,
      damping, keyframe) hay que repetirlo aca a mano.
 
-     Modelo de PLANTA solamente. `erp.sim.plant.blind_variant` sigue compilando
-     MyPalletizer260.xml, asi que el EKF no sabe que el adaptador existe.
+     Modelo de PLANTA, y desde `erp.estimators.EKFFSR` tambien dos cosas mas:
+     - el MAPA de contacto del FSR (`erp.sim.dynamics.MujocoContactGeometry`,
+       herramienta `fsr_tip`), cargado tal cual con load_model;
+     - la dinamica del filtro en las corridas con FSR, via `blind_variant`, que
+       le apaga el piso. El adaptador no tiene masa, asi que esa dinamica es
+       IDENTICA a la del brazo pelado (test_plant.py lo verifica paso a paso,
+       y es tambien lo que detecta que esta copia se desincronizo del base).
+     Sin FSR el filtro sigue compilando MyPalletizer260.xml.
      Diferencias con el base: el body `fsr`, el site `efector` movido a la punta
      de la cupula, y el sensor `fsr_force` (nsensordata 15 -> 16). -->
 <mujoco model="freshfile_mujoco">

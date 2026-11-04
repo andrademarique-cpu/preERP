@@ -65,13 +65,13 @@ import mujoco as mj
 import numpy as np
 
 from erp.analysis import consistency_report
-from erp.estimators import EKF
+from erp.estimators import EKF, EKFFSR
 from erp.fusion import FilterRunner
 from erp.io.config import build_decoder, load_config
 from erp.io.paths import resolve_repo_path
 from erp.sensors import LiveSimSensor
 from erp.sensors.mujoco import make_R, rows_of
-from erp.sim.dynamics import MujocoDynamics
+from erp.sim.dynamics import MujocoContactGeometry, MujocoDynamics
 from erp.sim.mujoco import h_dyn, make_Q, state_dim
 from erp.sim.plant import blind_variant, load_model, warmup_to_rest
 from erp.trajectory import slew_limit
@@ -101,6 +101,8 @@ PROP_MODELS = {
     "stair": XML_RELATIVE.with_name("MyPalletizer260_stair.xml"),
     # Las dos escaleras REALES del banco, medidas (prop_escaleras_reales.xml).
     "escaleras": XML_RELATIVE.with_name("MyPalletizer260_escaleras.xml"),
+    # El brazo con el adaptador del FSR (cupula + <touch> fsr_force), sin props.
+    "fsr": XML_RELATIVE.with_name("MyPalletizer260_fsr.xml"),
 }
 
 # Identicos a los de `make_golden_run.py` y `demo_three_way.py`: las tres corridas
@@ -226,7 +228,8 @@ class Teleop:
 
     def __init__(
         self, xml_path: Path, degrade: str, blind_xml: Path | None = None,
-        floor_collides: bool = False,
+        floor_collides: bool = False, geometria_xml: Path | None = None,
+        pen_on: float = 0.0,
     ) -> None:
         self.degrade = degrade
         cfg = load_config()
@@ -301,7 +304,16 @@ class Teleop:
 
         Q = make_Q(self.model_b, SIG_ALPHA, SIG_ACT_BLIND, SIG_CM)
         P0 = np.diag([np.deg2rad(1.0) ** 2] * self.nx)
-        self.ekf = EKF(x0.copy(), P0, Q, R_declared, MujocoDynamics(self.model_b, self.data_b))
+        dyn = MujocoDynamics(self.model_b, self.data_b)
+        # `geometria_xml`: el MAPA de solidos para el FSR (ver erp.estimators.EKFFSR).
+        # Es el XML de la PLANTA, cargado aparte: la dinamica del filtro sigue
+        # sin contacto, el contacto entra solo como medicion ON/OFF.
+        if geometria_xml is None:
+            self.ekf: EKF = EKF(x0.copy(), P0, Q, R_declared, dyn)
+        else:
+            mapa, mapa_data = load_model(geometria_xml)
+            geo = MujocoContactGeometry(mapa, mapa_data, nx=self.nx)
+            self.ekf = EKFFSR(x0.copy(), P0, Q, R_declared, dyn, geo, pen_on=pen_on)
         # `buffer_horizon` = la latencia del sensor, y NO 0.0. Es el unico valor
         # que funciona con una fuente viva, y descubrirlo costo una corrida:
         # `advance_to_safe(t)` con horizonte 0 ES `advance_to(t)`, asi que el

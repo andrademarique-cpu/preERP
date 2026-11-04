@@ -7,6 +7,8 @@
     python scripts/medir_penetracion.py --escenario escaleras   # data/processed/plan_escaleras.csv
     python scripts/medir_penetracion.py --escenario piso --degrade swap        # DEBE recortar
     python scripts/medir_penetracion.py --escenario todos       # la tabla entera
+    python scripts/medir_penetracion.py --escenario piso --filtro-modela nada piso --fsr --graficar
+                                        # + columna `fsr`: EKFFSR, el FSR como contacto ON/OFF
 
 EL SINTOMA: cuando el brazo toca algo que el modelo del filtro no tiene, el
 estimado deriva y la pose estimada atraviesa el solido. El fantasma de
@@ -40,6 +42,7 @@ Castellano, como sus hermanos en `scripts/`. No pasa por CI (ni ruff ni mypy).
 from __future__ import annotations
 
 import argparse
+import itertools
 import sys
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -59,7 +62,15 @@ from erp.sensors.mujoco import rows_of
 from erp.sim.plant import distancias, geoms_por_clase
 
 XML_ARM = base.XML_RELATIVE
+XML_FSR = XML_ARM.with_name("MyPalletizer260_fsr.xml")
 XML_FSR_ESCALERAS = XML_ARM.with_name("MyPalletizer260_fsr_escaleras.xml")
+# ON = la fuerza del <touch> pasa este umbral. El FSR de la tesis de Nipote es
+# ruidoso y con umbral por debajo de ~2 N; medido aca: 0 N a 16 mm del piso y
+# 24-32 N apoyado, asi que 1 N separa limpio.
+FSR_UMBRAL_N = 1.0
+# Lo que la cupula se hunde apoyada con el contacto rigido del adaptador
+# (solref -1e5 -1e3): medido 0.75-0.88 mm a 24-32 N.
+PEN_ON_M = 0.0008
 PLAN_ESCALERAS = ("data", "processed", "plan_escaleras.csv")
 
 RETENCION_S = 1.5      # cuanto empuja contra el solido
@@ -133,19 +144,22 @@ def pose_para(model: Any, rot: float, r: float, z: float, q_ini: np.ndarray) -> 
     raise RuntimeError(f"sin pose para r = {r:.3f} m, z = {z:.3f} m")
 
 
-def guion(nombre: str, q0: np.ndarray) -> Guion:
+def guion(nombre: str, q0: np.ndarray, con_fsr: bool = False) -> Guion:
+    # `con_fsr`: libre y piso corren sobre el brazo CON adaptador (misma dinamica,
+    # otra punta y contacto rigido), para que todas las columnas compartan planta.
+    brazo = XML_FSR if con_fsr else XML_ARM
     if nombre == "libre":
         # Lejos de todo: ningun punto de este recorrido baja de ~5 cm.
         obj, dur = por_paradas([(np.array([1.0, 0.6, -0.5]), RETENCION_S),
                                 (q0, 0.0)], q0)
-        return Guion(nombre, XML_ARM, dur, obj)
+        return Guion(nombre, brazo, dur, obj)
 
     if nombre == "piso":
         # link1 al tope (1.57) con link2 en 0: la consigna queda ~4 cm debajo
         # del piso, asi que el servo EMPUJA contra el piso todo el tiempo.
         obj, dur = por_paradas([(np.array([0.0, 1.57, 0.0]), RETENCION_S),
                                 (q0, 0.0)], q0)
-        return Guion(nombre, XML_ARM, dur, obj)
+        return Guion(nombre, brazo, dur, obj)
 
     if nombre == "lateral":
         # B3 (el mas alto y el mas afuera, az 66 grados) por el costado: bajar
@@ -194,28 +208,62 @@ class Corrida:
     normal: np.ndarray       # (N, K, 3) normal del obstaculo en la pose ESTIMADA
     sigma_n: np.ndarray      # (N, K) m, sigma del efector a lo largo de esa normal
     nis: np.ndarray          # (M,) NIS de las actualizaciones aplicadas
+    t_nis: np.ndarray        # (M,) s, sello de muestra de cada una
     q_true: np.ndarray       # (N, 3) rad
     q_est: np.ndarray        # (N, 3) rad
+    n_on: int = 0            # correcciones del FSR aplicadas en ON
+    n_off: int = 0           # y en OFF (estimado adentro con el FSR sin apretar)
 
 
-def correr(g: Guion, modela: str, degrade: str) -> Corrida:
+def correr(g: Guion, modela: str, degrade: str, umbral_n: float = FSR_UMBRAL_N) -> Corrida:
+    """Una corrida. `modela` = nada | piso | todo | fsr.
+
+    `fsr`: dinamica SIN contacto (el brazo con adaptador, que pesa lo mismo) +
+    `EKFFSR`, con el mapa = el XML de la planta. Cada tick lee `fsr_force` de la
+    planta y llama `update_contacto(fuerza > umbral)`. Simplificacion de tiempo,
+    a sabiendas: la correccion se aplica al tiempo actual del filtro, que va un
+    horizonte (6 ms) atras de la lectura. Sellarla bien es trabajo de
+    `FilterRunner`, y queda para despues.
+    """
     plant_xml = resolve_repo_path(*g.planta.parts)
-    blind_xml = plant_xml if modela == "todo" else resolve_repo_path(*XML_ARM.parts)
+    # El brazo del FILTRO lleva la misma punta que la planta. La dinamica es
+    # identica (adaptador sin masa), pero lo que el piso MODELADO toca no: con
+    # el brazo pelado su colisionador mas bajo es `ee_collider`, 33 mm arriba de
+    # la cupula, y la columna `piso` nunca tocaria nada -- daba bit a bit lo
+    # mismo que `nada`, que es como se encontro esto.
+    con_adaptador = g.planta in (XML_FSR, XML_FSR_ESCALERAS)
+    brazo_filtro = XML_FSR if con_adaptador else XML_ARM
+    if modela == "todo":
+        blind_xml = plant_xml
+    else:
+        blind_xml = resolve_repo_path(*brazo_filtro.parts)
+    if modela == "fsr" and not con_adaptador:
+        raise SystemExit(f"`fsr` necesita una planta con adaptador, no {g.planta.name}")
     teleop = base.Teleop(plant_xml, degrade, blind_xml=blind_xml,
-                         floor_collides=modela in ("piso", "todo"))
+                         floor_collides=modela in ("piso", "todo"),
+                         geometria_xml=plant_xml if modela == "fsr" else None,
+                         pen_on=PEN_ON_M)
     n_steps = max(1, round((1.0 / base.RENDER_HZ) / teleop.dt))
     model = teleop.model
     data_med = mj.MjData(model)      # PROPIO: nunca escribir el qpos de la planta
     herr, obs = geoms_por_clase(model)
     nv = int(teleop.model_b.nv)
+    fila_fsr = rows_of(model, "fsr_force") if modela == "fsr" else None
 
     ts, de, dv, nn, qt, qe, XH, PP = [], [], [], [], [], [], [], []
+    t_nis: list[float] = []
+    n_on = n_off = 0
     while teleop.t < g.duracion_s:
         q = g.objetivo(teleop.t)
         for i in range(3):
             teleop.set_target(i, float(q[i]))
         teleop.jog()
         teleop.step(n_steps)
+        t_nis.extend(ts_m for ts_m, _, _ in teleop.updates)
+        if fila_fsr is not None:
+            on = float(teleop.data.sensordata[fila_fsr][0]) > umbral_n
+            if teleop.ekf.update_contacto(on) is not None:
+                n_on, n_off = n_on + on, n_off + (not on)
         d_true, _ = distancias(model, data_med, teleop.data.qpos, herr, obs)
         d_est, normal = distancias(model, data_med, teleop.ekf.x[:nv], herr, obs)
         ts.append(teleop.t)
@@ -236,7 +284,8 @@ def correr(g: Guion, modela: str, degrade: str) -> Corrida:
     return Corrida(
         t=np.array(ts), nombres=[model.geom(int(o)).name for o in obs],
         d_est=np.array(de), d_true=np.array(dv), normal=normal_a, sigma_n=sigma_n,
-        nis=np.array(teleop.nis), q_true=np.array(qt), q_est=np.array(qe),
+        nis=np.array(teleop.nis), t_nis=np.array(t_nis),
+        q_true=np.array(qt), q_est=np.array(qe), n_on=n_on, n_off=n_off,
     )
 
 
@@ -274,50 +323,193 @@ def guardar_csv(c: Corrida, path: Path) -> None:
     np.savetxt(path, datos, delimiter=",", header=",".join(cols), comments="", fmt="%.6g")
 
 
-def graficar(c: Corrida, titulo: str) -> None:
+# Paleta: los slots categoricos 1-5 de la paleta de referencia, validada (CVD y
+# vision normal pasan; aqua/amarillo/magenta quedan < 3:1 contra el fondo, por
+# eso las curvas de junta llevan rotulo directo ademas de la leyenda).
+FONDO = "#fcfcfb"
+TINTA = "#0b0b0b"
+TINTA_2 = "#52514e"
+GRILLA = "#e6e5e1"
+CONTACTO = "#ecebe7"
+C_VERDAD = "#2a78d6"     # slot 1
+C_ESTIMADO = "#eb6834"   # slot 2
+C_JUNTAS = ("#1baf7a", "#eda100", "#e87ba4")   # slots 3-5: rot, link1, link2
+NOMBRES_JUNTAS = ("J1 rot", "J2 link1", "J3 link2")
+TITULO_MODELA = {
+    "nada": "filtro SIN el solido (piso no modelado)",
+    "piso": "filtro CON piso solido",
+    "todo": "filtro con TODOS los solidos",
+    "fsr": "filtro SIN el solido + FSR ON/OFF",
+}
+D_VISTA_MM = (-12.0, 30.0)   # la distancia satura en DIST_MAX (50 mm): se recorta la vista
+
+
+def _estilo(ax: Any) -> None:
+    ax.set_facecolor(FONDO)
+    ax.grid(True, color=GRILLA, lw=0.6)
+    ax.set_axisbelow(True)
+    for lado in ("top", "right"):
+        ax.spines[lado].set_visible(False)
+    for lado in ("left", "bottom"):
+        ax.spines[lado].set_color(GRILLA)
+    ax.tick_params(colors=TINTA_2, labelsize=8, length=0)
+
+
+def _sombrear_contacto(ax: Any, c: Corrida) -> None:
+    contacto = c.d_true.min(axis=1) <= 0.0
+    ax.fill_between(c.t, 0, 1, where=contacto, transform=ax.get_xaxis_transform(),
+                    color=CONTACTO, lw=0, zorder=0)
+
+
+def figura_ab(corridas: list[tuple[str, Corrida]], escenario: str) -> Any:
+    """Una columna por modelo del filtro; filas: distancia, error de junta, NIS.
+
+    Distancia CON signo (no la penetracion recortada en 0): asi se ve el caso
+    que importa, la verdad que sube mientras el estimado sigue abajo de cero.
+    La banda es +-2 sigma del estimado a lo largo de la normal; un estimado
+    afuera de su propia banda respecto de la verdad es el recorte sobreconfiado.
+    Ejes Y compartidos por fila, para que las columnas se comparen a ojo.
+    """
     import matplotlib.pyplot as plt
 
-    p_est = np.maximum(0.0, -c.d_est.min(axis=1)) * 1e3
-    p_true = np.maximum(0.0, -c.d_true.min(axis=1)) * 1e3
-    fig, ax = plt.subplots(2, 1, sharex=True, figsize=(9, 5))
-    contacto = c.d_true.min(axis=1) <= 0.0
-    for a in ax:
-        a.fill_between(c.t, 0, 1, where=contacto, transform=a.get_xaxis_transform(),
-                       alpha=0.15, label="contacto verdadero")
-    ax[0].plot(c.t, p_true, label="verdad")
-    ax[0].plot(c.t, p_est, label="estimado")
-    ax[0].set_ylabel("penetracion [mm]")
-    ax[0].legend()
-    ax[1].plot(c.t, p_est - p_true)
-    ax[1].axhline(UMBRAL_MM, ls="--", lw=0.8)
-    ax[1].set_ylabel("exceso [mm]")
-    ax[1].set_xlabel("t [s]")
-    fig.suptitle(titulo)
-    fig.tight_layout()
-    plt.show()
+    n = len(corridas)
+    fig, axs = plt.subplots(3, n, sharex="col", sharey="row", squeeze=False,
+                            figsize=(5.2 * n + 0.6, 7.6),
+                            gridspec_kw={"height_ratios": [1.4, 1.0, 0.8]})
+    fig.patch.set_facecolor(FONDO)
+    rotulos: list[tuple[Any, float, np.ndarray]] = []   # (eje, t final, error final por junta)
+
+    for j, (modela, c) in enumerate(corridas):
+        k = np.argmin(c.d_est, axis=1)
+        idx = np.arange(len(c.t))
+        d_est = c.d_est[idx, k] * 1e3
+        d_true = c.d_true.min(axis=1) * 1e3
+        sig = np.nan_to_num(c.sigma_n[idx, k]) * 1e3
+        r, _ = resumir(c)
+        ax_d, ax_q, ax_n = axs[:, j]
+        for ax in (ax_d, ax_q, ax_n):
+            _estilo(ax)
+            _sombrear_contacto(ax, c)
+
+        # -- fila 1: distancia con signo
+        ax_d.axhspan(-1e3, 0.0, color="#f6f5f2", lw=0, zorder=0)
+        ax_d.axhline(0.0, color=TINTA_2, lw=0.8)
+        ax_d.fill_between(c.t, d_est - 2 * sig, d_est + 2 * sig, color=C_ESTIMADO,
+                          alpha=0.18, lw=0, label="estimado ±2σ")
+        ax_d.plot(c.t, d_true, color=C_VERDAD, lw=2, label="verdad")
+        ax_d.plot(c.t, d_est, color=C_ESTIMADO, lw=2, label="estimado")
+        # Abajo se abre hasta el punto mas hondo, para que el marcador no quede afuera.
+        ax_d.set_ylim(min(D_VISTA_MM[0], float(np.min(d_est)) * 1.15), D_VISTA_MM[1])
+        ax_d.text(0.01, 0.03, "adentro del sólido", transform=ax_d.transAxes,
+                  color=TINTA_2, fontsize=8, va="bottom")
+        # El peor exceso, marcado y rotulado: es la cifra de la corrida.
+        exceso = np.maximum(0.0, -d_est) - np.maximum(0.0, -d_true)
+        i_max = int(np.argmax(exceso))
+        if exceso[i_max] > UMBRAL_MM:
+            ax_d.plot([c.t[i_max]] * 2, [d_true[i_max] if d_true[i_max] < 0 else 0.0,
+                                          d_est[i_max]], color=TINTA, lw=1)
+            ax_d.plot(c.t[i_max], d_est[i_max], "o", ms=8, mfc=C_ESTIMADO,
+                      mec=FONDO, mew=2, zorder=5)
+            sig_txt = ("" if np.isnan(r.max_exceso_sigma)
+                       else f" = {r.max_exceso_sigma:.1f}σ")
+            ax_d.annotate(f"{exceso[i_max]:.1f} mm adentro{sig_txt}",
+                          (c.t[i_max], d_est[i_max]), xytext=(8, -14),
+                          textcoords="offset points", color=TINTA, fontsize=9)
+        ax_d.set_title(TITULO_MODELA.get(modela, modela), color=TINTA, fontsize=10,
+                       loc="left", pad=18)
+        rec = "∞" if np.isinf(r.recuperacion_s) else f"{r.recuperacion_s:.2f} s"
+        ax_d.text(0.0, 1.02, f"exceso máx {r.max_exceso_mm:.2f} mm · "
+                  f"{r.integral_mm_s:.2f} mm·s · recuperación {rec}",
+                  transform=ax_d.transAxes, color=TINTA_2, fontsize=8)
+
+        # -- fila 2: error de junta, rotulado al final de cada curva
+        err = np.rad2deg(c.q_est - c.q_true)
+        for i in range(3):
+            ax_q.plot(c.t, err[:, i], color=C_JUNTAS[i], lw=2, label=NOMBRES_JUNTAS[i])
+        ax_q.axhline(0.0, color=TINTA_2, lw=0.8)
+        rotulos.append((ax_q, c.t[-1], err[-1]))
+
+        # -- fila 3: NIS por actualizacion, escala log
+        ax_n.plot(c.t_nis, c.nis, "o", ms=3, color=TINTA_2, label="NIS")
+        ax_n.axhline(12.0, color=TINTA_2, lw=0.8, ls="--")
+        ax_n.text(c.t[-1] * 1.21, 12.0, "objetivo 12", color=TINTA_2, fontsize=8,
+                  va="bottom", ha="right",
+                  bbox={"facecolor": FONDO, "edgecolor": "none", "pad": 1})
+        ax_n.set_yscale("log")
+        ax_n.set_xlabel("t [s]", color=TINTA_2, fontsize=9)
+        ax_n.set_xlim(c.t[0], c.t[-1] * 1.22)    # sitio para los rotulos de junta
+
+    axs[0, 0].set_ylabel("distancia herramienta–sólido [mm]", color=TINTA_2, fontsize=9)
+    axs[1, 0].set_ylabel("error de junta [°]", color=TINTA_2, fontsize=9)
+    axs[2, 0].set_ylabel("NIS (log)", color=TINTA_2, fontsize=9)
+
+    # Leyenda unica arriba: las mismas series en todas las columnas.
+    from matplotlib.patches import Patch
+
+    h, lab = axs[0, 0].get_legend_handles_labels()
+    hq, labq = axs[1, 0].get_legend_handles_labels()
+    h += hq + [Patch(color=CONTACTO)]
+    lab += labq + ["contacto verdadero"]
+    fig.legend(h, lab, loc="upper center", ncol=len(lab), frameon=False, fontsize=8,
+               labelcolor=TINTA_2, bbox_to_anchor=(0.5, 0.965))
+    fig.suptitle(f"Recorte del estimado en sólidos — escenario «{escenario}»",
+                 color=TINTA, fontsize=12, x=0.01, ha="left", y=0.995)
+    fig.tight_layout(rect=(0, 0, 1, 0.935))
+
+    # Rotulos directos al final de cada curva de junta, separados en vertical
+    # para que no se pisen cuando los errores finales son parecidos. Despues del
+    # layout, porque la separacion se mide en pixeles del eje ya dibujado.
+    fig.canvas.draw()
+    for ax, t_fin, e_fin in rotulos:
+        y_px = ax.transData.transform(np.column_stack([np.full(3, t_fin), e_fin]))[:, 1]
+        orden = np.argsort(y_px)
+        min_px = 11.0 * fig.dpi / 72.0
+        pos = y_px.copy()
+        for a, b in itertools.pairwise(orden):
+            pos[b] = max(pos[b], pos[a] + min_px)
+        pos -= (pos[orden].mean() - y_px[orden].mean())   # recentrar el grupo
+        for i in range(3):
+            ax.annotate(f"{NOMBRES_JUNTAS[i]} {e_fin[i]:+.1f}°", (t_fin, e_fin[i]),
+                        xytext=(6, (pos[i] - y_px[i]) * 72.0 / fig.dpi),
+                        textcoords="offset points", color=TINTA_2, fontsize=8,
+                        va="center")
+    return fig
 
 
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument("--escenario", default="piso",
                     choices=("libre", "piso", "lateral", "escaleras", "todos"))
-    ap.add_argument("--filtro-modela", default="nada", choices=("nada", "piso", "todo"))
+    ap.add_argument("--filtro-modela", nargs="+", default=["nada"],
+                    choices=("nada", "piso", "todo", "fsr"),
+                    help="uno o varios; con --graficar, una columna por cada uno")
     ap.add_argument("--degrade", default="none", choices=base.DEGRADATIONS)
     ap.add_argument("--csv", type=Path, default=None, help="serie temporal de UNA corrida")
-    ap.add_argument("--graficar", action="store_true", help="matplotlib ([viz])")
+    ap.add_argument("--graficar", action="store_true",
+                    help="figura por escenario, columnas = modelos del filtro ([viz])")
+    ap.add_argument("--png", type=Path, default=None,
+                    help="carpeta donde guardar las figuras en vez de abrir ventanas")
+    ap.add_argument("--fsr", action="store_true",
+                    help="agrega la columna `fsr` (EKFFSR) y pone el adaptador en la planta")
+    ap.add_argument("--fsr-umbral", type=float, default=FSR_UMBRAL_N,
+                    help="fuerza del <touch> que cuenta como ON, N")
     args = ap.parse_args(argv)
 
     q0 = np.asarray(base.Teleop(resolve_repo_path(*XML_ARM.parts), "none").q0)
-    if args.escenario == "todos":
-        planes = [(e, m) for e in ("libre", "piso", "lateral", "escaleras")
-                  for m in ("nada", "piso", "todo")]
-    else:
-        planes = [(args.escenario, args.filtro_modela)]
+    escenarios = (("libre", "piso", "lateral", "escaleras") if args.escenario == "todos"
+                  else (args.escenario,))
+    modelos = (("nada", "piso", "todo") if args.escenario == "todos"
+               else tuple(dict.fromkeys(args.filtro_modela)))
+    if args.fsr and "fsr" not in modelos:
+        modelos = (*modelos, "fsr")
+    con_fsr = "fsr" in modelos
+    planes = [(e, m) for e in escenarios for m in modelos]
+    figuras: dict[str, list[tuple[str, Corrida]]] = {}
 
     print(ENCABEZADO)
     for esc, modela in planes:
-        g = guion(esc, q0)
-        c = correr(g, modela, args.degrade)
+        g = guion(esc, q0, con_fsr)
+        c = correr(g, modela, args.degrade, args.fsr_umbral)
         glob, por_obs = resumir(c)
         etiqueta = f"{esc}/{modela}" + ("" if args.degrade == "none" else f"/{args.degrade}")
         print(fila(etiqueta, glob))
@@ -328,11 +520,31 @@ def main(argv: list[str] | None = None) -> int:
         print(f"{'':<26}NIS mediana {med:.2f}, max {c.nis.max(initial=0):.1f}, "
               f"n = {len(c.nis)};  |q_est - q_true| final "
               f"{np.rad2deg(np.abs(c.q_est[-1] - c.q_true[-1])).round(2)} grados")
+        if modela == "fsr":
+            print(f"{'':<26}FSR: {c.n_on} correcciones en ON, {c.n_off} en OFF")
         if args.csv and len(planes) == 1:
             guardar_csv(c, args.csv)
             print(f"serie en {args.csv}")
-        if args.graficar:
-            graficar(c, etiqueta)
+        if args.graficar or args.png:
+            figuras.setdefault(esc, []).append((modela, c))
+
+    if figuras:
+        import matplotlib
+
+        if args.png:
+            matplotlib.use("Agg")      # sin ventana: solo archivos
+        import matplotlib.pyplot as plt
+
+        for esc, corridas in figuras.items():
+            fig = figura_ab(corridas, esc)
+            if args.png:
+                args.png.mkdir(parents=True, exist_ok=True)
+                sufijo = "" if args.degrade == "none" else f"_{args.degrade}"
+                path = args.png / f"penetracion_{esc}{sufijo}.png"
+                fig.savefig(path, dpi=150, facecolor=fig.get_facecolor())
+                print(f"figura en {path}")
+        if not args.png:
+            plt.show()
     return 0
 
 

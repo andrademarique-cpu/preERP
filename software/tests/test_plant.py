@@ -374,3 +374,108 @@ def test_the_scenery_does_not_move_the_physics(xml_path) -> None:
         mj.mj_step(bare, bare_data)
         worst = max(worst, float(np.abs(data.sensordata - bare_data.sensordata).max()))
     assert worst == 0.0, f"the scenery moved the physics by {worst:.3e}"
+
+
+# -- the FSR model and its contact geometry ---------------------------------
+
+FSR_XML = ("mechanical", "mujoco_assets", "MyPalletizer260", "MyPalletizer260_fsr.xml")
+FSR_STAIRS_XML = ("mechanical", "mujoco_assets", "MyPalletizer260",
+                  "MyPalletizer260_fsr_escaleras.xml")
+
+
+def _x_of(q: list[float]) -> np.ndarray:
+    """Blind-filter state (nx = 11) at joint angles q, `act` closing the tendon."""
+    x = np.zeros(11)
+    x[:3] = q
+    x[3] = 1.5693 - q[1] - q[2]
+    return x
+
+
+def test_fsr_blind_model_steps_exactly_like_the_bare_one(blind) -> None:
+    """The adapter is massless, so the filter may run on either XML.
+
+    `MyPalletizer260_fsr.xml` is a hand-kept COPY of the base arm; this is also
+    what catches the two drifting apart (a limit or a damping changed in one).
+    """
+    from erp.sim.mujoco import step_with_jacobian
+
+    mb, db = blind
+    mf, df = blind_variant(resolve_repo_path(*FSR_XML))
+    rng = np.random.default_rng(0)
+    for _ in range(5):
+        x = np.r_[warmup_to_rest(mb, db, Q_CMD_REST), Q_CMD_REST] + rng.normal(0, 0.05, 11)
+        xa, Fa = step_with_jacobian(x, np.zeros(3), mb, db)
+        xb, Fb = step_with_jacobian(x, np.zeros(3), mf, df)
+        np.testing.assert_allclose(xb, xa, rtol=0, atol=1e-12)
+        np.testing.assert_allclose(Fb, Fa, rtol=0, atol=1e-12)
+
+
+@pytest.mark.parametrize("q", [[0.0, 1.1, 0.0], [0.0, 1.0, 0.2], [0.5, 1.1, -0.3],
+                               [-0.4, 0.9, 0.4]])
+def test_contact_jacobian_matches_finite_differences(q) -> None:
+    """Analytic dd/dx (mj_jac along the normal) against central differences.
+
+    Poses outside and inside solids, including one inside a stair block where J1
+    has a gradient. d itself must equal `distancias` restricted to `fsr_tip`.
+    """
+    import mujoco as mj
+
+    from erp.sim.dynamics import MujocoContactGeometry
+
+    model, data = load_model(resolve_repo_path(*FSR_STAIRS_XML))
+    geo = MujocoContactGeometry(model, data, nx=11)
+    x = _x_of(q)
+    d, D = geo.distance(x)
+    fd = np.zeros(11)
+    for k in range(11):
+        e = np.zeros(11)
+        e[k] = 1e-6
+        fd[k] = (geo.distance(x + e)[0] - geo.distance(x - e)[0]) / 2e-6
+    np.testing.assert_allclose(D, fd, atol=1e-8)
+    assert not D[4:].any(), "velocity and activation do not move the distance"
+
+    tip = np.array([model.geom("fsr_tip").id])
+    _, obs = geoms_por_clase(model)
+    ref, _ = distancias(model, mj.MjData(model), x[:4], tip, obs, dist_max=0.5)
+    assert d == pytest.approx(float(ref.min()), abs=1e-12)
+
+
+def test_fsr_force_and_the_geometry_agree_on_contact() -> None:
+    """The ON signal (touch > 1 N) is true exactly when `fsr_tip` is in contact.
+
+    Driven by the servo into the floor at several depths: clear of the floor the
+    pad reads 0 N, and in contact it reads tens of newtons with d < 0 (the
+    adapter's stiff solref keeps it under ~1 mm).
+    """
+    import mujoco as mj
+
+    from erp.sensors.mujoco import rows_of
+    from erp.sim.dynamics import MujocoContactGeometry
+
+    model, data = load_model(resolve_repo_path(*FSR_XML))
+    geo = MujocoContactGeometry(model, mj.MjData(model), nx=11)
+    row = rows_of(model, "fsr_force")
+    for cmd in (0.9, 1.0, 1.2, 1.57):
+        mj.mj_resetDataKeyframe(model, data, model.key("home").id)
+        for _ in range(1500):
+            data.ctrl[:3] = [0.0, cmd, 0.0]
+            mj.mj_step(model, data)
+        force = float(data.sensordata[row][0])
+        d, _ = geo.distance(np.r_[data.qpos, np.zeros(7)])
+        assert (force > 1.0) == (d < 0.0), (cmd, force, d)
+        if d < 0.0:
+            assert -0.002 < d, "the stiff adapter contact stays within ~1 mm"
+
+
+def test_contact_geometry_is_validated() -> None:
+    from erp.sim.dynamics import MujocoContactGeometry
+
+    model, data = load_model(resolve_repo_path(*FSR_XML))
+    with pytest.raises(KeyError, match="fsr_tip"):
+        bare, bare_data = load_model(resolve_repo_path(*XML))
+        MujocoContactGeometry(bare, bare_data, nx=11)
+    with pytest.raises(ValueError, match="nx"):
+        MujocoContactGeometry(model, data, nx=4)
+    with pytest.raises(ValueError, match="solidos"):
+        blind_model, blind_data = blind_variant(resolve_repo_path(*FSR_XML))
+        MujocoContactGeometry(blind_model, blind_data, nx=11)

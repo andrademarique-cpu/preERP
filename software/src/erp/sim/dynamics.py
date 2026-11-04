@@ -18,11 +18,12 @@ import numpy.typing as npt
 
 from erp.core.types import Array
 from erp.sim.mujoco import observe_with_jacobian, state_dim, step_with_jacobian
+from erp.sim.plant import distancia_con_jacobiana, geoms_por_clase
 
 MjModel = Any
 MjData = Any
 
-__all__ = ["MujocoDynamics"]
+__all__ = ["MujocoContactGeometry", "MujocoDynamics"]
 
 
 class MujocoDynamics:
@@ -84,4 +85,71 @@ class MujocoDynamics:
         return (
             f"MujocoDynamics(nx={self.nx}, nz={self.nz}, nu={self.nu}, "
             f"dt={self.dt * 1e3:.0f} ms)"
+        )
+
+
+class MujocoContactGeometry:
+    """`ContactGeometry` sobre el MAPA de la escena: herramienta vs solidos conocidos.
+
+    El modelo que se le pasa es el de la PLANTA cargado con `load_model` (por
+    ejemplo `MyPalletizer260_fsr.xml` o `MyPalletizer260_fsr_escaleras.xml`),
+    NO el modelo ciego de la dinamica. Son dos cosas a proposito: el mapa
+    necesita los solidos (piso y props con conaffinity = 2) y la dinamica del
+    filtro no tiene que tenerlos -- con contacto en la dinamica el estimado se
+    pega al piso al levantar (`scripts/medir_penetracion.py`). Las dos comparten
+    el brazo: mismo nq = nv y mismo orden, asi que `x[:nv]` vale para las dos.
+
+    `herramienta` es la geometria SENSIBLE, por nombre: `fsr_tip`, la cupula que
+    cubre el `fsr_pad` del `<touch>`. ON quiere decir que toco la cupula, no el
+    cilindro del adaptador ni el `ee_collider`.
+
+    `nx` es el del FILTRO, no el del mapa: el mapa es la planta (na = 0, nx = 8)
+    y el filtro corre sobre el modelo ciego (na = 3, nx = 11). Se exige que el
+    mapa tenga el mismo nv y que entre en `nx`; las activaciones no mueven la
+    distancia y su bloque de `D` es cero.
+
+    `data` es un `MjData` PROPIO del mapa (el de `load_model`); se escribe su
+    qpos en cada llamada.
+    """
+
+    def __init__(
+        self,
+        model: MjModel,
+        data: MjData,
+        nx: int,
+        *,
+        herramienta: str = "fsr_tip",
+        dist_max: float = 0.5,
+    ) -> None:
+        nombres = [str(model.geom(g).name) for g in range(int(model.ngeom))]
+        if herramienta not in nombres:
+            con_nombre = sorted(n for n in nombres if n)
+            raise KeyError(f"el mapa no tiene el geom {herramienta!r}; tiene {con_nombre}")
+        _, obstaculos = geoms_por_clase(model)
+        if obstaculos.size == 0:
+            raise ValueError("el mapa no tiene solidos (ningun geom con conaffinity = 2)")
+        if int(model.nq) != int(model.nv) or nx < 2 * int(model.nv):
+            raise ValueError(
+                f"el mapa (nq={model.nq}, nv={model.nv}) no encaja en un estado de nx={nx}"
+            )
+        self.model = model
+        self.data = data
+        self.herramienta = np.array([nombres.index(herramienta)], dtype=np.intp)
+        self.obstaculos = obstaculos
+        self.dist_max = float(dist_max)
+        self.nx: int = int(nx)
+
+    def distance(self, x: npt.ArrayLike) -> tuple[float, Array]:
+        xa = np.asarray(x, dtype=np.float64)
+        if xa.size != self.nx:
+            raise ValueError(f"x tiene {xa.size} elementos, el mapa pide {self.nx}")
+        return distancia_con_jacobiana(
+            self.model, self.data, xa, self.herramienta, self.obstaculos, self.dist_max
+        )
+
+    def __repr__(self) -> str:
+        nombre = self.model.geom(int(self.herramienta[0])).name
+        return (
+            f"MujocoContactGeometry(herramienta={nombre!r}, "
+            f"obstaculos={len(self.obstaculos)}, nx={self.nx})"
         )
