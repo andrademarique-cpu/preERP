@@ -109,9 +109,19 @@ class EKF:
                 f"R tiene que ser ({rows_i.size}, {rows_i.size}) para estas rows, "
                 f"es {R_k.shape}"
             )
+        return y, self._corregir(y, H, R_k)
+
+    def _corregir(self, y: Array, H: Array, R_k: Array) -> float:
+        """La correccion en si, con la innovacion `y` (k,) ya formada. -> NIS.
+
+        Separada de `update` para que otras mediciones (el contacto de
+        `EKFFSR`) usen la MISMA aritmetica -- Joseph, `solve`, `make_spd` -- y
+        no una copia que despues diverja. Mover el cuerpo aca no cambia un solo
+        numero: lo garantiza `make_golden_run.py --check` a rtol=1e-12.
+        """
         S = make_spd(H @ self.P @ H.T + R_k)
         K = np.linalg.solve(S, H @ self.P).T  # = P H^T S^-1
         self.x = self.x + K @ y
         I_KH = np.eye(self.x.size) - K @ H
         self.P = make_spd(I_KH @ self.P @ I_KH.T + K @ R_k @ K.T)
-        return y, float(y @ np.linalg.solve(S, y))
+        return float(y @ np.linalg.solve(S, y))
