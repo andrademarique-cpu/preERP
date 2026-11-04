@@ -20,7 +20,7 @@ from typing import Any
 import mujoco as mj
 import numpy as np
 
-from erp.core.types import Array
+from erp.core.types import Array, IntArray
 
 # `Any` para los objetos de MuJoCo: la libreria no trae `py.typed`, asi que
 # `mj.MjModel` y `mj.MjData` son `Any` para mypy de todas formas. Escribirlo
@@ -28,9 +28,25 @@ from erp.core.types import Array
 MjModel = Any
 MjData = Any
 
-__all__ = ["blind_variant", "load_model", "sensor_layout", "state_dim_of", "warmup_to_rest"]
+__all__ = [
+    "blind_variant",
+    "distancias",
+    "geoms_por_clase",
+    "load_model",
+    "sensor_layout",
+    "state_dim_of",
+    "warmup_to_rest",
+]
 
 HOME_KEYFRAME = "home"
+
+# Clases de colision de los XML: la herramienta lleva contype=2 (`ee_collider`,
+# y `fsr_cyl`/`fsr_tip` en el modelo del FSR) y los solidos que la frenan
+# conaffinity=2 (piso, props). El resto del brazo es 0/0 y atraviesa todo, en la
+# planta tambien.
+CLASE_HERRAMIENTA = 2
+CLASE_OBSTACULO = 2
+DIST_MAX_M = 0.05
 
 
 def load_model(
@@ -57,8 +73,13 @@ def load_model(
     return model, data
 
 
+FLOOR_GEOM = "floor"
+
+
 def blind_variant(
-    xml_path: str | Path, keyframe: str | None = HOME_KEYFRAME
+    xml_path: str | Path,
+    keyframe: str | None = HOME_KEYFRAME,
+    floor_collides: bool = False,
 ) -> tuple[MjModel, MjData]:
     """El mismo XML con los actuadores pasados a `dyntype="integrator"`.
 
@@ -74,11 +95,25 @@ def blind_variant(
     Ganancias, forcerange y el bloque `<sensor>` quedan identicos, que es lo
     que permite comparar `h(x)` contra el log de la planta.
 
+    El piso del modelo del FILTRO no choca (`floor_collides=False`, por
+    defecto). La planta lo sigue teniendo solido -- `scene.xml` no se toca --
+    asi que un toque del efector contra el piso pasa a ser dinamica NO
+    modelada, igual que los props: es el banco para reproducir el sintoma de
+    "el estimado atraviesa la superficie". Se apaga `contype`/`conaffinity` en
+    vez de borrar el geom, porque borrarlo renumera los geoms y mueve lo que
+    `erp.viz.ghost` y `test_plant.py` indexan. `floor_collides=True` devuelve
+    el comportamiento anterior (piso modelado), para comparar.
+
     -> (model, data)
     """
     spec = mj.MjSpec.from_file(str(xml_path))
     for actuator in spec.actuators:
         actuator.dyntype = mj.mjtDyn.mjDYN_INTEGRATOR
+    if not floor_collides:
+        floor = spec.geom(FLOOR_GEOM)
+        if floor is not None:
+            floor.contype = 0
+            floor.conaffinity = 0
     model = spec.compile()
     data = mj.MjData(model)
     if keyframe is not None:
@@ -86,6 +121,67 @@ def blind_variant(
         if keyframe in names:
             mj.mj_resetDataKeyframe(model, data, model.key(keyframe).id)
     return model, data
+
+
+def geoms_por_clase(model: MjModel) -> tuple[IntArray, IntArray]:
+    """(herramienta, obstaculos): ids de geoms segun su clase de colision.
+
+    Por clase y no por nombre, la misma regla que `scripts/planear_escaleras.py`:
+    un prop nuevo con conaffinity=2 entra solo. Solo cuenta la herramienta,
+    porque es lo unico del brazo que choca EN LA PLANTA; los eslabones
+    atraviesan los solidos tambien en la verdad, y medirles la penetracion no
+    distinguiria el error del filtro del de la planta.
+    """
+    contype = np.asarray(model.geom_contype)
+    conaff = np.asarray(model.geom_conaffinity)
+    herramienta = np.flatnonzero(contype == CLASE_HERRAMIENTA).astype(np.intp)
+    obstaculos = np.flatnonzero(conaff == CLASE_OBSTACULO).astype(np.intp)
+    return herramienta, obstaculos
+
+
+def distancias(
+    model: MjModel,
+    data: MjData,
+    qpos: Array,
+    herramienta: IntArray,
+    obstaculos: IntArray,
+    dist_max: float = DIST_MAX_M,
+) -> tuple[Array, Array]:
+    """Distancia CON SIGNO de la herramienta a cada obstaculo, en la pose `qpos`.
+
+    Negativa = penetracion. Por obstaculo es el minimo sobre los geoms de la
+    herramienta, y es lo mismo que el `contact.dist` mas hondo de
+    `mj_collision` (test_plant.py lo usa de oraculo). Mas lejos que `dist_max`
+    se reporta `dist_max`: `mj_geomDistance` no busca mas alla.
+
+    Solo cinematica (`mj_kinematics`): no toca qvel, act ni fuerzas, asi que
+    sirve igual para la pose verdadera y para la estimada. `data` tiene que ser
+    un MjData PROPIO de esta medicion; escribe su `qpos`.
+
+    `normal` es unitaria, sale del obstaculo hacia afuera (la direccion en que
+    la herramienta tendria que moverse para separarse), marco mundo. Cero si
+    los dos puntos coinciden y no hay direccion.
+
+    -> dist (n_obs,) m;  normal (n_obs, 3) adimensional, marco mundo
+    """
+    nq = int(model.nq)
+    data.qpos[:nq] = np.asarray(qpos, dtype=np.float64)[:nq]
+    mj.mj_kinematics(model, data)
+    dist = np.full(len(obstaculos), float(dist_max))
+    normal = np.zeros((len(obstaculos), 3))
+    fromto = np.zeros(6)
+    for k, g_obs in enumerate(obstaculos):
+        for g in herramienta:
+            d = float(mj.mj_geomDistance(model, data, int(g), int(g_obs), float(dist_max), fromto))
+            if d < dist[k]:
+                dist[k] = d
+                # fromto = (punto en la herramienta, punto en el obstaculo).
+                # Separados, (desde - hasta) ya apunta hacia afuera; adentro se
+                # invierte, y el signo de d lo corrige.
+                v = fromto[:3] - fromto[3:]
+                n = float(np.linalg.norm(v))
+                normal[k] = np.sign(d) * v / n if n > 0.0 else 0.0
+    return np.asarray(dist, dtype=np.float64), np.asarray(normal, dtype=np.float64)
 
 
 def warmup_to_rest(model: MjModel, data: MjData, q_cmd: Array, warmup_steps: int = 100) -> Array:

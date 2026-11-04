@@ -225,7 +225,8 @@ class Teleop:
     """
 
     def __init__(
-        self, xml_path: Path, degrade: str, blind_xml: Path | None = None
+        self, xml_path: Path, degrade: str, blind_xml: Path | None = None,
+        floor_collides: bool = False,
     ) -> None:
         self.degrade = degrade
         cfg = load_config()
@@ -240,7 +241,12 @@ class Teleop:
         # prop y el que usa cualquier llamador viejo.
         self.model, self.data = load_model(xml_path)
         self.dt = float(self.model.opt.timestep)
-        self.model_b, self.data_b = blind_variant(blind_xml or xml_path)
+        # `floor_collides`: si el piso del FILTRO es solido. Por defecto no (ver
+        # `blind_variant`): tocar el piso es dinamica no modelada, como un prop.
+        # `scripts/medir_penetracion.py` lo prende para la comparacion A/B.
+        self.model_b, self.data_b = blind_variant(
+            blind_xml or xml_path, floor_collides=floor_collides
+        )
         self.nx = state_dim(self.model_b)
 
         self.imu_rows = rows_of(self.model_b, *cfg.imu.layout)

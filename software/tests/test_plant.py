@@ -18,7 +18,15 @@ import pytest
 from erp.io.paths import resolve_repo_path
 from erp.sensors.mujoco import rows_of
 from erp.sim.mujoco import h_dyn, state_dim
-from erp.sim.plant import blind_variant, load_model, sensor_layout, state_dim_of, warmup_to_rest
+from erp.sim.plant import (
+    blind_variant,
+    distancias,
+    geoms_por_clase,
+    load_model,
+    sensor_layout,
+    state_dim_of,
+    warmup_to_rest,
+)
 
 pytestmark = pytest.mark.mujoco
 
@@ -219,17 +227,120 @@ def test_the_scenery_is_index_safe(plant, blind) -> None:
     assert mesh_idx == [0, 1, 2, 10, 18]
     assert [int(model.geom_dataid[i]) for i in mesh_idx] == [0, 1, 2, 3, 4]
 
-    # Visual only: no state, no sensor channels, no contacts.
+    # No state and no sensor channels. Contacts are deliberately split: the
+    # PLANT's floor is solid (`scene.xml`, so the `ee_collider` rests on it),
+    # the FILTER's is not (`blind_variant`), which makes touching the floor
+    # unmodelled dynamics. `test_blind_floor_does_not_collide` pins both halves.
     assert (model.nq, model.nv, model.na) == (4, 4, 0)
     assert model.nsensordata == 15
-    assert int(model.geom_contype[floor]) == 0
-    assert int(model.geom_conaffinity[floor]) == 0
 
     # The blind variant is compiled from the same XML through MjSpec, and it is
     # the model the ghost is drawn from, so it has to agree.
     assert model_blind.ngeom == model.ngeom
     blind_mesh = [i for i in range(model_blind.ngeom) if int(model_blind.geom_type[i]) == mesh]
     assert blind_mesh == mesh_idx
+
+
+def test_blind_floor_does_not_collide(xml_path, plant, blind) -> None:
+    """The filter's floor is contact-free; the plant's floor and the opt-out are not.
+
+    Checked by contact, not just by flags: the effector is pushed below z = 0 in
+    every model, and only the solid-floor ones may report a contact with the
+    floor. The `floor_collides=True` build is the broken variant -- it is
+    `blind_variant` before the floor was removed -- and must fail the
+    blind-model assertion.
+    """
+    import mujoco as mj
+
+    def floor_contacts(model) -> int:
+        data = mj.MjData(model)
+        mj.mj_resetDataKeyframe(model, data, model.key("home").id)
+        floor = mj.mj_name2id(model, mj.mjtObj.mjOBJ_GEOM, "floor")
+        # link1 at its upper stop (1.57 rad) and link2 at 0 put the
+        # `ee_collider` below the floor plane (found by a grid sweep over both).
+        for name, q in (("link1", 1.57), ("link2", 0.0)):
+            jid = mj.mj_name2id(model, mj.mjtObj.mjOBJ_JOINT, name)
+            data.qpos[model.jnt_qposadr[jid]] = q
+        mj.mj_forward(model, data)
+        hits = 0
+        for c in data.contact[: data.ncon]:
+            if floor in (int(c.geom1), int(c.geom2)):
+                hits += 1
+        return hits
+
+    plant_model, _ = plant
+    blind_model, _ = blind
+    modelled_floor, _ = blind_variant(xml_path, floor_collides=True)
+
+    floor = mj.mj_name2id(blind_model, mj.mjtObj.mjOBJ_GEOM, "floor")
+    assert int(blind_model.geom_contype[floor]) == 0
+    assert int(blind_model.geom_conaffinity[floor]) == 0
+    assert floor_contacts(blind_model) == 0
+
+    # The halves that must still collide, or the check above proves nothing.
+    assert floor_contacts(plant_model) > 0, "pose does not reach the floor"
+    assert floor_contacts(modelled_floor) > 0
+    assert blind_model.ngeom == plant_model.ngeom, "the floor geom must stay (index safety)"
+
+
+FLOOR_POSE = {"link1": 1.57, "link2": 0.0}   # puts `ee_collider` ~67 mm into the floor
+
+
+def _pose(model, data, pose):
+    import mujoco as mj
+
+    mj.mj_resetDataKeyframe(model, data, model.key("home").id)
+    for name, q in pose.items():
+        data.qpos[model.jnt_qposadr[model.joint(name).id]] = q
+    return np.array(data.qpos, dtype=np.float64)
+
+
+def test_distancias_is_mujocos_own_contact_depth(plant) -> None:
+    """Signed tool-floor distance equals the deepest `contact.dist` of mj_collision.
+
+    MuJoCo is the oracle, not a hand-computed depth. The broken variant is an
+    unsigned distance: it reports the same magnitude, so only the sign test
+    below can tell it apart, and it must fail it.
+    """
+    import mujoco as mj
+
+    model, _ = plant
+    herr, obs = geoms_por_clase(model)
+
+    oracle = mj.MjData(model)
+    qpos = _pose(model, oracle, FLOOR_POSE)
+    mj.mj_forward(model, oracle)
+    floor = model.geom("floor").id
+    deepest = min(float(c.dist) for c in oracle.contact[: oracle.ncon]
+                  if floor in (int(c.geom1), int(c.geom2)) and
+                  {int(c.geom1), int(c.geom2)} & set(herr.tolist()))
+
+    dist, normal = distancias(model, mj.MjData(model), qpos, herr, obs)
+    k = int(np.flatnonzero(obs == floor)[0])
+    assert dist[k] == pytest.approx(deepest, abs=1e-9)
+    assert dist[k] < -0.01, "the pose should be well inside the floor"
+    # The broken variant, an unsigned distance, fails both checks above: it has
+    # the right magnitude and the wrong sign.
+    unsigned = abs(dist[k])
+    assert unsigned != pytest.approx(deepest, abs=1e-9)
+    assert not unsigned < -0.01
+    # Out of the floor is +z, inside it as well as above it.
+    np.testing.assert_allclose(normal[k], [0.0, 0.0, 1.0], atol=1e-6)
+    # Close enough to be inside `dist_max` (50 mm), so a direction exists.
+    near = _pose(model, mj.MjData(model), {"link1": 1.0, "link2": 0.0})   # ~20 mm up
+    above, n_above = distancias(model, mj.MjData(model), near, herr, obs)
+    assert 0.0 < above[k] < 0.05
+    np.testing.assert_allclose(n_above[k], [0.0, 0.0, 1.0], atol=1e-6)
+
+
+def test_geoms_por_clase_finds_tool_and_solids_without_names() -> None:
+    """Collision class, not a name list: the stair wrapper's six blocks come in alone."""
+    xml = resolve_repo_path(*XML[:-1], "MyPalletizer260_escaleras.xml")
+    model, _ = load_model(xml)
+    herr, obs = geoms_por_clase(model)
+    assert [model.geom(int(g)).name for g in herr] == ["ee_collider"]
+    names = {model.geom(int(g)).name for g in obs}
+    assert names == {"floor", "esc_A1", "esc_A2", "esc_A3", "esc_B1", "esc_B2", "esc_B3"}
 
 
 def test_the_scenery_does_not_move_the_physics(xml_path) -> None:

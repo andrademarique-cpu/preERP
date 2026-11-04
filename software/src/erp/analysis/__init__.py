@@ -18,11 +18,15 @@ con ``mujoco`` cualquier test que lo ejercite de punta a punta.
 
 from erp.analysis.consistency import ConsistencyReport, consistency_report
 from erp.analysis.lag import estimate_lag
+from erp.analysis.penetracion import ResumenPenetracion, penetracion, resumen_penetracion
 from erp.analysis.site import propagate_to_site
 
 __all__ = [
     "ConsistencyReport",
+    "ResumenPenetracion",
     "consistency_report",
     "estimate_lag",
+    "penetracion",
     "propagate_to_site",
+    "resumen_penetracion",
 ]
