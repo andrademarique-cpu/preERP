@@ -1,0 +1,64 @@
+<!-- Contacto de la herramienta: UNA clase para todas las simulaciones.
+
+     QUE CUBRE
+     Solo las herramientas chocan (contype = 2: ee_collider, fsr_cyl, fsr_tip). El
+     piso y todos los props son pasivos (conaffinity = 2). Con priority="1" en la
+     herramienta, su solref/solimp manda ENTERO en cada contacto. Sin priority,
+     MuJoCo mezcla los solref de los dos geoms, y mezclar uno negativo con el 0.02
+     del piso no significa nada. Asi que alcanza con esta clase: los solidos no se
+     tocan, y las envolturas (_box, _stair, _escaleras, _fsr_escaleras) la heredan
+     sin editarlas.
+
+     USO (igual que axis_xyz.xml)
+     Incluir DENTRO del <default> de nivel superior del modelo:
+         <default> ... <include file="../contacto.xml" /> </default>
+     y poner class="herramienta" en cada geom que choca. contype/conaffinity siguen
+     en el geom: esta clase no los toca.
+
+     LOS VALORES, medidos con scripts/barrer_contacto.py (2026-11-09; 84 candidatos
+     en 5 corridas: piso con FSR, piso con ee_collider, empuje lateral de J1 contra
+     la escalera, recorrido de escaleras, caja con ee_collider)
+       solref -1.5e5 -542  = rigidez k y amortiguamiento b directos (negativo);
+                              b = 2*zeta*sqrt(k) con zeta = 0.7.
+       solimp 0.95 0.99 0.001 0.5 2
+                           = impedancia mas alta que el default (0.9 0.95): el
+                              constraint toma mas de la fuerza que pide el solref.
+     Penetracion sostenida (mediana, apoyado), antes -> ahora:
+       cupula FSR contra el piso    0.96 -> 0.44 mm
+       ee_collider contra el piso   2.57 -> 0.08 mm
+       cupula en las escaleras      0.64 -> 0.32 mm
+       ee_collider sobre la caja    1.17 -> 0.03 mm
+     Sin parpadeo de la fuerza (0 pasos en 0 N con el contacto asentado), chatter
+     < 1 %, sin warnings y sin fuerza en fsr_cyl en los empujes verticales.
+
+     EL BORDE DE ESTABILIDAD, a dt = 2 ms. Lo fija el AMORTIGUAMIENTO, no k:
+       k*dt^2 + 2*b*dt < ~4. Este valor tiene 2.77.
+     Pasados ~3.8 rebota (la fuerza parpadea a 0 la mitad de los pasos), y el
+     primero en romperse es el empuje lateral. El contacto anterior, -1e5 -1e3
+     (zeta 1.58, margen 4.4), estaba EN el borde: era estable solo porque el
+     ee_collider era blando y absorbia. Con el ee_collider rigido rebotaba de lado.
+     Hacia lo rigido, este valor esta cerca de su borde en la planta: -1.75e5 -586
+     con el mismo solimp ya deja la fuerza en 0 un 0.3 % de los pasos apoyados.
+
+     POR QUE NO EL MAS RIGIDO QUE LA PLANTA AGUANTA. solimp 0.995 0.9995 con
+     -1.5e5 -658 dejaba la cupula a 0.08 mm y la planta estable en las 5 corridas,
+     pero ROMPE EL FILTRO cuando su modelo lleva solidos (`blind_variant(...,
+     floor_collides=True)`, columnas `piso`/`todo` de medir_penetracion.py): la
+     F de mjd_transitionFD a traves de un contacto tan rigido llega a radio
+     espectral 3.5 durante 260 pasos seguidos, P crece ~12x por paso, NIS 5456
+     y 55 grados de error en piso, LinAlgError en lateral. Esta clase es la mas
+     rigida que pasa la planta Y deja al filtro sano en piso / lateral /
+     escaleras (NIS max 253 / 73 / 27, error de junta final <= 0.6 grados).
+     Ojo: TODO contacto rigido da algun paso con |eig F| > 1 en el filtro -- el
+     viejo -1e5 -1e3 daba NIS 4550 y 10.6 grados en lateral -- asi que la
+     columna `piso`/`todo` es fragil por construccion, no por este valor.
+
+     SI CAMBIA EL TIMESTEP, este valor deja de valer: el borde escala con dt.
+     Volver a correr scripts/barrer_contacto.py antes de tocar <option timestep>.
+     (Tampoco hay que tocarlo a la ligera por otras razones: make_Q es DWNA a 2 ms
+     y la corrida dorada se genero con ese paso.) -->
+<mujocoinclude>
+    <default class="herramienta">
+        <geom priority="1" solref="-1.5e5 -542" solimp="0.95 0.99 0.001 0.5 2" />
+    </default>
+</mujocoinclude>

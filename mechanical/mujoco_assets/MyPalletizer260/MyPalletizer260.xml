@@ -7,6 +7,7 @@
         <mesh scale="0.001 0.001 0.001" />
         <geom contype="0" conaffinity="0" />
         <include file="../axis_xyz.xml" />
+        <include file="../contacto.xml" />
     </default>
     <custom>
         <numeric name="ground_offset" data="0.06052" />
@@ -81,7 +82,7 @@
                             </frame>
                             <geom name="ee_collider" type="cylinder"
                                   fromto="0 0 0 0 0.003 -.05" size="0.018"
-                                  mass="0" contype="2" conaffinity="1"
+                                  mass="0" contype="2" conaffinity="1" class="herramienta"
                                   rgba="0.95 0.35 0.10 0.55" group="3" />
                         </body>
                     </body>

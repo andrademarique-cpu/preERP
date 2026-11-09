@@ -68,9 +68,11 @@ XML_FSR_ESCALERAS = XML_ARM.with_name("MyPalletizer260_fsr_escaleras.xml")
 # ruidoso y con umbral por debajo de ~2 N; medido aca: 0 N a 16 mm del piso y
 # 24-32 N apoyado, asi que 1 N separa limpio.
 FSR_UMBRAL_N = 1.0
-# Lo que la cupula se hunde apoyada con el contacto rigido del adaptador
-# (solref -1e5 -1e3): medido 0.75-0.88 mm a 24-32 N.
-PEN_ON_M = 0.0008
+# Lo que la cupula se hunde apoyada con el contacto de la clase "herramienta"
+# (mechanical/mujoco_assets/contacto.xml): mediana 0.44 mm contra el piso y
+# 0.32 mm en las escaleras (scripts/barrer_contacto.py). Con el contacto
+# anterior (-1e5 -1e3, solimp por defecto) eran 0.75-0.96 mm.
+PEN_ON_M = 0.0004
 PLAN_ESCALERAS = ("data", "processed", "plan_escaleras.csv")
 
 RETENCION_S = 1.5      # cuanto empuja contra el solido

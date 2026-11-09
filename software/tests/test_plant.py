@@ -444,8 +444,9 @@ def test_fsr_force_and_the_geometry_agree_on_contact() -> None:
     """The ON signal (touch > 1 N) is true exactly when `fsr_tip` is in contact.
 
     Driven by the servo into the floor at several depths: clear of the floor the
-    pad reads 0 N, and in contact it reads tens of newtons with d < 0 (the
-    adapter's stiff solref keeps it under ~1 mm).
+    pad reads 0 N, and in contact it reads tens of newtons with d < 0. The
+    tool contact class (`contacto.xml`) holds it to ~0.5 mm; the 2 mm bound
+    below is deliberately loose, it only catches a return to the soft default.
     """
     import mujoco as mj
 
@@ -464,7 +465,7 @@ def test_fsr_force_and_the_geometry_agree_on_contact() -> None:
         d, _ = geo.distance(np.r_[data.qpos, np.zeros(7)])
         assert (force > 1.0) == (d < 0.0), (cmd, force, d)
         if d < 0.0:
-            assert -0.002 < d, "the stiff adapter contact stays within ~1 mm"
+            assert -0.002 < d, "the stiff tool contact stays well under 2 mm"
 
 
 def test_contact_geometry_is_validated() -> None:

@@ -541,15 +541,27 @@ def _check_ghost_starts_on_the_arm(teleop: Teleop, tol: float = 1e-5) -> float:
     Un `dataid` equivocado deja las poses intactas y igual rinde el brazo mal
     -- eso lo cubre `test_viz_live.py` contra `mjv_updateScene`.
 
-    Con `--prop` la planta tiene MAS geoms que el fantasma (29 o 31 contra 28):
-    los del prop se agregan AL FINAL y los primeros `ngeom` del modelo ciego
-    son los mismos geoms con los mismos ids (verificado por nombre y body).
-    Por eso se comparan solo esos -- el prop no tiene contraparte en el
-    fantasma, y restar los arreglos enteros no difunde.
+    Se comparan BODIES emparejados por NOMBRE, no geoms por indice. Con
+    `--prop box/stair` los geoms del prop se agregan al final y el indice
+    alcanzaba; con `--prop fsr` no: ese modelo es una copia que mete
+    `fsr_cyl`/`fsr_tip` ADENTRO de `act`, corre todos los ids de despues, y la
+    comparacion por indice restaba geoms distintos (0.2 m de "error" con las
+    poses identicas, 6e-8 m emparejando por nombre). Los bodies del fantasma
+    existen todos en la planta con el mismo nombre; los que solo tiene la
+    planta (el prop, el `fsr`) no tienen contraparte y se saltean.
     """
     db = teleop.ghost_data()
-    n = int(teleop.model_b.ngeom)
-    err = float(np.abs(np.asarray(teleop.data.geom_xpos)[:n] - np.asarray(db.geom_xpos)).max())
+    mb, mp = teleop.model_b, teleop.model
+    pares = [
+        (mj.mj_name2id(mp, mj.mjtObj.mjOBJ_BODY, nombre), i)
+        for i in range(1, int(mb.nbody))
+        if (nombre := mj.mj_id2name(mb, mj.mjtObj.mjOBJ_BODY, i))
+    ]
+    faltan = [i for p, i in pares if p < 0]
+    if faltan:
+        raise SystemExit(f"bodies del fantasma sin par en la planta: {faltan}")
+    ip, ib = (np.array(c) for c in zip(*pares, strict=True))
+    err = float(np.abs(np.asarray(teleop.data.xpos)[ip] - np.asarray(db.xpos)[ib]).max())
     if err > tol:
         raise SystemExit(
             f"planta y fantasma arrancan en poses distintas: {err:.3e} m"

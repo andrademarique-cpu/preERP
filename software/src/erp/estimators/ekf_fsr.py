@@ -22,8 +22,8 @@ para siempre -- mientras que sin contacto en la dinamica se porta bien.
 
 - ON  -> igualdad: "la cupula esta en la superficie", z = -pen_on, h(x) = d(x).
          `pen_on` es lo que el contacto se hunde de verdad: 0 en un banco
-         rigido; ~0.8 mm en la simulacion con el contacto rigido del adaptador
-         (`MyPalletizer260_fsr.xml`, solref -1e5 -1e3).
+         rigido; ~0.4 mm en la simulacion con la clase de contacto
+         "herramienta" (`mechanical/mujoco_assets/contacto.xml`).
 - OFF -> DESIGUALDAD: d(x) >= 0. Solo se aplica si el estimado esta ADENTRO
          (d < -tol_off), como pseudo-medicion z = 0 que lo empuja hacia afuera.
          Si esta afuera no se toca nada -- ni x ni P --, porque OFF no dice

@@ -22,6 +22,7 @@
         <mesh scale="0.001 0.001 0.001" />
         <geom contype="0" conaffinity="0" />
         <include file="../axis_xyz.xml" />
+        <include file="../contacto.xml" />
     </default>
     <custom>
         <numeric name="ground_offset" data="0.06052" />
@@ -89,7 +90,7 @@
                             <inertial mass="0.0495256" pos="-0.000000054 -0.003980175 -0.025138034" fullinertia="2.29199e-5 1.77687e-5 1.66803e-5 0 0 6.86140e-7" />
                             <geom name="ee_collider" type="cylinder"
                                   fromto="0 0 0 0 0.003 -.05" size="0.018"
-                                  mass="0" contype="2" conaffinity="1"
+                                  mass="0" contype="2" conaffinity="1" class="herramienta"
                                   rgba="0.95 0.35 0.10 0.55" group="3" />
                             <!-- Adaptador del FSR: cilindro + esfera en la punta (MuJoCo no
                                  tiene semiesfera; la mitad de la esfera queda adentro del
@@ -113,22 +114,21 @@
                                  penetracion, que es por que el contacto no parecia estar en la
                                  punta.
 
-                                 solref NEGATIVO = rigidez y amortiguamiento directos. Medido
-                                 contra el piso, empujando de 0 a 55 N: -1e5/-1e3 penetra <= 1.8 mm,
-                                 estable y sin contactos en el cilindro. -3e5 ya rebota a dt = 2 ms
-                                 (la fuerza parpadea a 0); 0.004 1, el solref positivo mas rigido
-                                 que admite el paso, igual penetra 7-10 mm.
-
-                                 priority="1": sin ella MuJoCo PROMEDIA el solref de los dos geoms
-                                 del contacto, y promediar uno negativo con el 0.02 del piso no
-                                 significa nada. Con priority manda el del adaptador, entero. -->
+                                 El contacto vive en la clase "herramienta" (../contacto.xml), la
+                                 misma del ee_collider en todos los modelos: priority, solref y
+                                 solimp, con lo medido y el borde de estabilidad. Con ella la cupula
+                                 queda 0.44 mm adentro del piso, apoyada. Historico: aca habia
+                                 priority="1" solref="-1e5 -1e3" con el solimp por defecto, que
+                                 penetraba 0.75-0.96 mm y estaba en el borde de rebote a dt = 2 ms.
+                                 Un solref positivo (0.004 1, el mas rigido que admite el paso)
+                                 penetra 7-10 mm. -->
                             <body name="fsr" pos="0 0.003 -0.05">
                                 <geom name="fsr_cyl" type="cylinder" fromto="0 0 0  0 0 -0.0186" size="0.0165"
                                       mass="0" contype="2" conaffinity="1" rgba="0.20 0.20 0.22 1"
-                                      priority="1" solref="-1e5 -1e3" />
+                                      class="herramienta" />
                                 <geom name="fsr_tip" type="sphere" pos="0 0 -0.0186" size="0.0165"
                                       mass="0" contype="2" conaffinity="1" rgba="0.20 0.20 0.22 1"
-                                      priority="1" solref="-1e5 -1e3" />
+                                      class="herramienta" />
                                 <!-- Zona sensible del FSR: el <touch> suma la fuerza normal de
                                      los contactos que caen ADENTRO de este site, y solo sobre
                                      geoms de este body. Un poco mas grande que la cupula para
