@@ -145,3 +145,123 @@ def test_no_mujoco_is_needed_for_the_fsr_filter() -> None:
                          timeout=120)
     assert out.returncode == 0, out.stderr
     assert out.stdout.startswith("OK")
+
+
+# --------------------------------------------------------------------------
+# The FSR as a row of the Measurement: `update` routes it to `update_contacto`.
+# --------------------------------------------------------------------------
+
+FILA = 2      # row 2 of z is the FSR, rows 0-1 stand in for the IMUs
+C3 = np.array([[1.0, 0.0], [0.0, 1.0], [0.0, 0.0]])   # blind model: its touch reads 0
+R3 = np.diag([0.01, 0.01, 0.25])
+ROWS = np.array([0, 1, FILA])
+
+
+def make3(x0, *, fila: int | None = FILA, A=None, dt: float = 1.0, **kw) -> EKFFSR:
+    dyn = LinearDynamics(np.eye(NX) if A is None else A, C=C3, dt=dt)
+    kw.setdefault("sig_contacto", SIG)
+    return EKFFSR(np.asarray(x0, float), np.diag([4e-4, 1e-4]), np.eye(NX) * 1e-6, R3, dyn,
+                  LinearGeometry(), fila_fsr=fila, **kw)
+
+
+@pytest.mark.parametrize(("x0", "fuerza"), [([-0.004, 0.1], 0.0),    # OFF, inside -> pushed out
+                                            ([0.006, 0.1], 20.0),    # ON, above -> pulled down
+                                            ([0.006, 0.1], 0.0)])    # OFF, outside -> untouched
+def test_the_fsr_row_is_imu_update_then_contact_bit_for_bit(x0, fuerza) -> None:
+    z = np.array([x0[0] + 0.001, x0[1] - 0.02, fuerza])
+    ekf = make3(x0, pen_on=0.0004)
+    y, nis = ekf.update(z, ROWS, R3)
+
+    ref = make3(x0, fila=None, pen_on=0.0004)
+    y_ref, nis_ref = ref.update(z, ROWS[:2], R3[:2, :2])
+    ref.update_contacto(fuerza > 1.0)
+
+    assert np.array_equal(ekf.x, ref.x)
+    assert np.array_equal(ekf.P, ref.P)
+    assert np.array_equal(y, y_ref)
+    assert nis == nis_ref, "the returned NIS is the IMUs' alone"
+
+
+def test_the_fsr_row_as_an_ordinary_channel_is_wrong() -> None:
+    """Broken variant: no `fila_fsr`, so 20 N reaches `EKF.update` against h = 0.
+
+    The blind model's touch reads 0 always, so the whole force becomes
+    innovation on a row whose H is zero: it cannot move x, but it is not
+    harmless -- it is a 20 N innovation in the NIS (400 / 0.25 = 1600 alone),
+    and the contact correction the force was carrying never happens.
+    """
+    x0, z = [0.006, 0.1], np.array([0.006, 0.1, 20.0])
+    good = make3(x0, pen_on=0.0004)
+    _, nis_good = good.update(z, ROWS, R3)
+    bad = make3(x0, fila=None, pen_on=0.0004)
+    _, nis_bad = bad.update(z, ROWS, R3)
+    assert nis_bad > 1000 * max(nis_good, 1e-9)
+    assert good.geometria.distance(good.x)[0] < 0.006 * 0.2, "ON pulled it to the surface"
+    assert bad.geometria.distance(bad.x)[0] == pytest.approx(0.006, abs=1e-4), "nothing did"
+
+
+def test_without_the_fsr_row_update_is_exactly_ekf() -> None:
+    z = np.array([0.005, 0.08, 99.0])
+    a, b = make3([0.006, 0.1]), make3([0.006, 0.1], fila=None)
+    assert np.array_equal(a.update(z, ROWS[:2])[0], b.update(z, ROWS[:2])[0])
+    assert np.array_equal(a.x, b.x) and np.array_equal(a.P, b.P)
+    assert a.contactos == []
+
+
+def test_each_fsr_reading_is_recorded_with_its_step() -> None:
+    # tol_off 1 mm: the first correction leaves the estimate microns inside,
+    # which the second OFF must then tolerate rather than correct again.
+    ekf = make3([-0.004, 0.0], pen_on=0.0004, tol_off=0.001)
+    ekf.predict()
+    ekf.predict()
+    ekf.update(np.array([-0.004, 0.0, 0.0]), ROWS)       # OFF, inside: corrected
+    ekf.predict()
+    ekf.update(np.array([0.010, 0.0, 0.3]), ROWS)        # 0.3 N < 1 N: OFF
+    c = ekf.tomar_contactos()
+    assert [k.paso for k in c] == [2, 3]
+    assert [k.en_contacto for k in c] == [False, False]
+    assert c[0].d_antes == pytest.approx(-0.004) and c[0].innovacion is not None
+    assert c[1].innovacion is None and c[1].nis is None
+    assert ekf.contactos == [], "tomar_contactos empties the list"
+
+
+def test_an_fsr_only_measurement_reports_the_contact() -> None:
+    ekf = make3([-0.004, 0.0])
+    y, nis = ekf.update(np.array([0.0, 0.0, 0.0]), [FILA])
+    assert y.shape == (1,) and y[0] == pytest.approx(0.004) and np.isfinite(nis)
+    y, nis = make3([0.01, 0.0]).update(np.array([0.0, 0.0, 0.0]), [FILA])
+    assert y.size == 0 and np.isnan(nis), "OFF outside: no correction, nothing to report"
+
+
+def test_the_runner_applies_the_contact_at_its_own_sample_step() -> None:
+    """Through `FilterRunner` the contact lands on the step of its timestamp.
+
+    Paired with what `scripts/medir_penetracion.py` did before: call
+    `update_contacto` after `advance_to_safe(now)`, i.e. at the filter's
+    current step, `buffer_horizon` too late and on a different estimate.
+    """
+    from erp.core.clock import VirtualClock
+    from erp.core.types import Measurement
+    from erp.fusion import FilterRunner
+
+    dt, horizon = 0.002, 0.006
+    A = np.array([[1.0, dt], [0.0, 1.0]])      # x[0] (height) falls at x[1] m/s
+    x0 = [0.002, -0.5]
+    t_m, t_now = 0.010, 0.040
+    z = np.array([0.0, -0.5, 20.0])
+
+    clock = VirtualClock(t_now)
+    ekf = make3(x0, A=A, dt=dt)
+    runner = FilterRunner(ekf, t0=0.0, buffer_horizon=horizon, clock=clock, record=False)
+    runner.ingest(Measurement(z, t_m, ROWS, R3, "fsr"))
+    runner.advance_to_safe(t_now)
+    (c,) = ekf.tomar_contactos()
+    assert c.paso == round(t_m / dt) == 5
+
+    late = make3(x0, A=A, dt=dt)
+    late_runner = FilterRunner(late, t0=0.0, buffer_horizon=horizon, clock=clock, record=False)
+    late_runner.advance_to_safe(t_now)
+    late.update(z, ROWS, R3)
+    (c_late,) = late.tomar_contactos()
+    assert c_late.paso == round((t_now - horizon) / dt) == 17
+    assert c_late.d_antes < c.d_antes, "a falling estimate, read 12 steps later"

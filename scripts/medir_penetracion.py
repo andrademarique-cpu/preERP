@@ -64,15 +64,11 @@ from erp.sim.plant import distancias, geoms_por_clase
 XML_ARM = base.XML_RELATIVE
 XML_FSR = XML_ARM.with_name("MyPalletizer260_fsr.xml")
 XML_FSR_ESCALERAS = XML_ARM.with_name("MyPalletizer260_fsr_escaleras.xml")
-# ON = la fuerza del <touch> pasa este umbral. El FSR de la tesis de Nipote es
-# ruidoso y con umbral por debajo de ~2 N; medido aca: 0 N a 16 mm del piso y
-# 24-32 N apoyado, asi que 1 N separa limpio.
-FSR_UMBRAL_N = 1.0
-# Lo que la cupula se hunde apoyada con el contacto de la clase "herramienta"
-# (mechanical/mujoco_assets/contacto.xml): mediana 0.44 mm contra el piso y
-# 0.32 mm en las escaleras (scripts/barrer_contacto.py). Con el contacto
-# anterior (-1e5 -1e3, solimp por defecto) eran 0.75-0.96 mm.
-PEN_ON_M = 0.0004
+# Umbral de ON y hundimiento apoyado: definidos UNA vez, en demo_teleop.py,
+# con lo medido. Aca solo se nombran. Con el contacto anterior a la clase
+# "herramienta" (-1e5 -1e3, solimp por defecto) el hundimiento era 0.75-0.96 mm.
+FSR_UMBRAL_N = base.FSR_UMBRAL_N
+PEN_ON_M = base.PEN_ON_M
 PLAN_ESCALERAS = ("data", "processed", "plan_escaleras.csv")
 
 RETENCION_S = 1.5      # cuanto empuja contra el solido
@@ -221,11 +217,33 @@ def correr(g: Guion, modela: str, degrade: str, umbral_n: float = FSR_UMBRAL_N) 
     """Una corrida. `modela` = nada | piso | todo | fsr.
 
     `fsr`: dinamica SIN contacto (el brazo con adaptador, que pesa lo mismo) +
-    `EKFFSR`, con el mapa = el XML de la planta. Cada tick lee `fsr_force` de la
-    planta y llama `update_contacto(fuerza > umbral)`. Simplificacion de tiempo,
-    a sabiendas: la correccion se aplica al tiempo actual del filtro, que va un
-    horizonte (6 ms) atras de la lectura. Sellarla bien es trabajo de
-    `FilterRunner`, y queda para despues.
+    `EKFFSR`, con el mapa = el XML de la planta. La fila `fsr_force` viaja en la
+    misma muestra que las IMUs (`LiveSimSensor`, 20 Hz, con ruido `SIG_FSR_N`)
+    y `FilterRunner` la entrega a `EKFFSR.update`, que la desvia a
+    `update_contacto(fuerza > umbral)` en el paso de SU sello.
+
+    Historico, hasta 2026-11-15: cada tick de render (60 Hz) se leia
+    `fsr_force` de la planta sin ruido y se llamaba `update_contacto` al tiempo
+    actual del filtro, un horizonte (6 ms) atras de la lectura. Medido con esa
+    ruta, `--escenario piso --filtro-modela nada fsr`: piso/fsr p_est 5.64 mm,
+    0.29 mm*s, recuperacion 0.02 s, NIS mediana 6.90 (max 660.2), 159
+    correcciones ON y 4 OFF.
+
+    Con la ruta nueva (2026-11-15, maquina A), mismo escenario:
+
+        FSR en la linea de las IMUs   p_est   mm*s   recup   ON/OFF   err final [deg]
+        20 Hz, sigma 0.2 N            10.97   1.41   0.05 s   50/3    0.23 0.79 0.75
+        20 Hz, sin ruido              10.97   1.41   0.05 s   50/3    0.23 0.79 0.75
+        60 Hz (IMUs tambien), 0.2 N    0.80   0.27   0.00 s  150/5    0.03 0.01 0.09
+        sin FSR (piso/nada)           22.27   2.87   0.13 s     -     0.06 0.24 0.60
+
+    Lo que dice: el ruido del FSR no pesa nada (bit a bit igual) y la TASA lo
+    es todo. A 20 Hz el FSR deja la mitad de la penetracion sin FSR; a 60 Hz
+    casi la elimina. OJO con la fila de 60 Hz: subio tambien la tasa de las
+    IMUs, porque van en la misma muestra, asi que no aisla la del contacto
+    sola. La ruta directa vieja (contacto a 60 Hz, IMUs a 20 Hz) no es
+    comparable con ninguna: leia la planta sin ruido a la tasa del render, que
+    el hardware no puede dar.
     """
     plant_xml = resolve_repo_path(*g.planta.parts)
     # El brazo del FILTRO lleva la misma punta que la planta. La dinamica es
@@ -244,17 +262,15 @@ def correr(g: Guion, modela: str, degrade: str, umbral_n: float = FSR_UMBRAL_N) 
     teleop = base.Teleop(plant_xml, degrade, blind_xml=blind_xml,
                          floor_collides=modela in ("piso", "todo"),
                          geometria_xml=plant_xml if modela == "fsr" else None,
-                         pen_on=PEN_ON_M)
+                         pen_on=PEN_ON_M, fsr=modela == "fsr", umbral_n=umbral_n)
     n_steps = max(1, round((1.0 / base.RENDER_HZ) / teleop.dt))
     model = teleop.model
     data_med = mj.MjData(model)      # PROPIO: nunca escribir el qpos de la planta
     herr, obs = geoms_por_clase(model)
     nv = int(teleop.model_b.nv)
-    fila_fsr = rows_of(model, "fsr_force") if modela == "fsr" else None
 
     ts, de, dv, nn, qt, qe, XH, PP = [], [], [], [], [], [], [], []
     t_nis: list[float] = []
-    n_on = n_off = 0
     while teleop.t < g.duracion_s:
         q = g.objetivo(teleop.t)
         for i in range(3):
@@ -262,10 +278,6 @@ def correr(g: Guion, modela: str, degrade: str, umbral_n: float = FSR_UMBRAL_N) 
         teleop.jog()
         teleop.step(n_steps)
         t_nis.extend(ts_m for ts_m, _, _ in teleop.updates)
-        if fila_fsr is not None:
-            on = float(teleop.data.sensordata[fila_fsr][0]) > umbral_n
-            if teleop.ekf.update_contacto(on) is not None:
-                n_on, n_off = n_on + on, n_off + (not on)
         d_true, _ = distancias(model, data_med, teleop.data.qpos, herr, obs)
         d_est, normal = distancias(model, data_med, teleop.ekf.x[:nv], herr, obs)
         ts.append(teleop.t)
@@ -287,7 +299,7 @@ def correr(g: Guion, modela: str, degrade: str, umbral_n: float = FSR_UMBRAL_N) 
         t=np.array(ts), nombres=[model.geom(int(o)).name for o in obs],
         d_est=np.array(de), d_true=np.array(dv), normal=normal_a, sigma_n=sigma_n,
         nis=np.array(teleop.nis), t_nis=np.array(t_nis),
-        q_true=np.array(qt), q_est=np.array(qe), n_on=n_on, n_off=n_off,
+        q_true=np.array(qt), q_est=np.array(qe), n_on=teleop.n_on, n_off=teleop.n_off,
     )
 
 

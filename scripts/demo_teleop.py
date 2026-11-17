@@ -6,6 +6,20 @@
     python scripts/demo_teleop.py --no-plots --no-panel   # solo el visor
     python scripts/demo_teleop.py --prop box              # una caja que golpear
     python scripts/demo_teleop.py --prop stair            # una escalera de 3 peldanos
+    python scripts/demo_teleop.py --prop fsr              # la punta del FSR + ventana de contacto
+    python scripts/demo_teleop.py --prop fsr_escaleras    # lo mismo, con las escaleras reales
+    python scripts/demo_teleop.py --prop fsr --sin-fsr    # falsificacion: mapa sin FSR
+
+EL FSR (`--prop fsr`, `fsr_escaleras`). La fila `fsr_force` (el `<touch>` de
+la cupula, N) viaja en la MISMA muestra que las IMUs, por `LiveSimSensor` y
+`FilterRunner`, y `EKFFSR.update` la desvia a `update_contacto(F > 1 N)`: ON
+pone la cupula sobre la superficie, OFF saca un estimado que quedo adentro. Lo
+que se ve: una cuarta ventana (fuerza del FSR; distancia con signo de la cupula
+al solido, planta contra estimado, con cada correccion marcada), la cupula del
+fantasma pintada (verde ON, naranja OFF, rojo adentro sin correccion) y el
+estado en la esquina del visor. Hasta 2026-11-15 `--prop fsr` cargaba la punta
+en la planta y nada mas: el filtro era un `EKF` comun y el FSR no llegaba a
+ningun lado.
 
 MANDO FINO. Tres piezas, cada una util sola:
   - teclas 1..5 en el visor: cinco finuras, de 0.6 rad/s (la de siempre) a
@@ -103,7 +117,34 @@ PROP_MODELS = {
     "escaleras": XML_RELATIVE.with_name("MyPalletizer260_escaleras.xml"),
     # El brazo con el adaptador del FSR (cupula + <touch> fsr_force), sin props.
     "fsr": XML_RELATIVE.with_name("MyPalletizer260_fsr.xml"),
+    # El adaptador + las escaleras reales del banco.
+    "fsr_escaleras": XML_RELATIVE.with_name("MyPalletizer260_fsr_escaleras.xml"),
 }
+# Las plantas con FSR. Con ellas el FILTRO corre sobre el brazo CON adaptador
+# (que no tiene masa: `test_plant.py` verifica paso a paso que su dinamica es la
+# del brazo pelado) porque solo ese modelo tiene la fila `fsr_force`, y el MAPA
+# de solidos es la planta misma. Ver `main`.
+FSR_PROPS = ("fsr", "fsr_escaleras")
+
+# El FSR como lectura de contacto (`erp.estimators.EKFFSR`).
+# ON = la fuerza pasa este umbral. Medido en la planta: 0 N a 16 mm del piso y
+# 24-32 N apoyado, asi que 1 N separa limpio. El FSR de la tesis de Nipote es
+# ruidoso y con umbral por debajo de ~2 N: en el banco real hay que volver a
+# medirlo. `scripts/medir_penetracion.py` lee estos mismos valores.
+FSR_UMBRAL_N = 1.0
+# Lo que la cupula se hunde apoyada con el contacto de la clase "herramienta"
+# (mechanical/mujoco_assets/contacto.xml): mediana 0.44 mm contra el piso y
+# 0.32 mm en las escaleras (scripts/barrer_contacto.py).
+PEN_ON_M = 0.0004
+# Ruido del FSR VIRTUAL, N. Nominal, NO medido. Chico a proposito: con 1 N de
+# umbral, 0.2 N deja la lectura libre (0 N) a 5 sigma del ON, o sea que el
+# sensor virtual no inventa toques. Uno de 0.5 N daria un ON falso en ~2% de
+# las muestras sin tocar nada, y cada uno tira el estimado libre contra la
+# superficie mas cercana.
+SIG_FSR_N = 0.2
+# Cuanto queda pintada la cupula del fantasma despues de una correccion, s. Las
+# correcciones son de a una muestra (50 ms); sin esto el destello dura un tick.
+DESTELLO_S = 0.3
 
 # Identicos a los de `make_golden_run.py` y `demo_three_way.py`: las tres corridas
 # tienen que ser comparables, y tres juegos de constantes serian tres experimentos.
@@ -229,9 +270,16 @@ class Teleop:
     def __init__(
         self, xml_path: Path, degrade: str, blind_xml: Path | None = None,
         floor_collides: bool = False, geometria_xml: Path | None = None,
-        pen_on: float = 0.0,
+        pen_on: float = 0.0, fsr: bool = False, umbral_n: float = FSR_UMBRAL_N,
     ) -> None:
+        """`fsr`: la fila `fsr_force` entra al sensor y de ahi a `EKFFSR.update`.
+        Necesita `geometria_xml` y un modelo ciego que tenga esa fila (el brazo
+        con adaptador). Con `geometria_xml` y `fsr=False` el filtro tiene mapa
+        pero nadie le da el FSR: es la falsificacion de `--sin-fsr`."""
         self.degrade = degrade
+        self.pen_on = float(pen_on)
+        if fsr and geometria_xml is None:
+            raise ValueError("fsr=True necesita geometria_xml (el mapa de solidos)")
         cfg = load_config()
         build_decoder(cfg.imu)      # valida el cableado del config antes de arrancar
 
@@ -289,8 +337,30 @@ class Teleop:
 
         R_declared = self.R / 100.0 if degrade == "overconfident" else self.R
         self.t = 0.0
+
+        # EL FSR ES UNA FILA MAS DE LA MISMA MUESTRA, al final: las 12 de las
+        # IMUs quedan en las posiciones 0-11 de `m.z`, asi que `acc_cols` sigue
+        # valiendo. La fila es la del modelo ciego y tiene que ser la misma en
+        # la planta -- el sensor lee `sensordata` de la PLANTA con indices del
+        # FILTRO, como siempre (`fsr_force` va AL FINAL del <sensor> justamente
+        # para eso, y es la 15 en los dos).
+        self.fila_fsr: int | None = None
+        sensor_rows, sensor_R = self.imu_rows, R_declared
+        if fsr:
+            fila_b, fila_p = rows_of(self.model_b, "fsr_force"), rows_of(self.model, "fsr_force")
+            if not np.array_equal(fila_b, fila_p):
+                raise SystemExit(
+                    f"fsr_force es la fila {fila_b} en el filtro y {fila_p} en la planta"
+                )
+            self.fila_fsr = int(fila_b[0])
+            self.fila_fsr_planta = int(fila_p[0])
+            sensor_rows = np.r_[self.imu_rows, self.fila_fsr]
+            n = self.imu_rows.size
+            sensor_R = np.zeros((n + 1, n + 1))
+            sensor_R[:n, :n] = R_declared
+            sensor_R[n, n] = SIG_FSR_N**2
         self.sensor = LiveSimSensor(
-            rows=self.imu_rows, R=R_declared, rate_hz=IMU_RATE_HZ,
+            rows=sensor_rows, R=sensor_R, rate_hz=IMU_RATE_HZ,
             latency_s=IMU_LATENCY_S, seed=0, clock=lambda: self.t, keep_truth=False,
         )
 
@@ -308,12 +378,14 @@ class Teleop:
         # `geometria_xml`: el MAPA de solidos para el FSR (ver erp.estimators.EKFFSR).
         # Es el XML de la PLANTA, cargado aparte: la dinamica del filtro sigue
         # sin contacto, el contacto entra solo como medicion ON/OFF.
+        self.geo: MujocoContactGeometry | None = None
         if geometria_xml is None:
             self.ekf: EKF = EKF(x0.copy(), P0, Q, R_declared, dyn)
         else:
             mapa, mapa_data = load_model(geometria_xml)
-            geo = MujocoContactGeometry(mapa, mapa_data, nx=self.nx)
-            self.ekf = EKFFSR(x0.copy(), P0, Q, R_declared, dyn, geo, pen_on=pen_on)
+            self.geo = MujocoContactGeometry(mapa, mapa_data, nx=self.nx)
+            self.ekf = EKFFSR(x0.copy(), P0, Q, R_declared, dyn, self.geo, pen_on=pen_on,
+                              fila_fsr=self.fila_fsr, umbral_n=umbral_n)
         # `buffer_horizon` = la latencia del sensor, y NO 0.0. Es el unico valor
         # que funciona con una fuente viva, y descubrirlo costo una corrida:
         # `advance_to_safe(t)` con horizonte 0 ES `advance_to(t)`, asi que el
@@ -354,6 +426,18 @@ class Teleop:
         # Las actualizaciones aplicadas en el ULTIMO tick: (sello de muestra,
         # z de 12, NIS). Para los graficos; `step` la vacia al empezar.
         self.updates: list[tuple[float, Any, float]] = []
+
+        # Contacto, en el ULTIMO tick (solo con mapa). Lo leen los graficos y
+        # el visor; `step` lo llena. Distancias en m, negativas adentro.
+        self.fsr_medido: list[tuple[float, float]] = []      # (sello, N)
+        self.correcciones: list[tuple[float, bool, float]] = []   # (t, ON?, d antes)
+        self.fuerza_planta = float("nan")
+        self.fsr_ultimo = float("nan")
+        self.d_planta = float("nan")
+        self.d_est = float("nan")
+        self.n_on = 0
+        self.n_off = 0
+        self.t_ultima: tuple[float, bool] | None = None      # para el destello
 
     # -- teclado ------------------------------------------------------------
 
@@ -466,7 +550,11 @@ class Teleop:
         # muestra que el sensor esta por liberar: el filtro le gana la carrera
         # a su propia medicion. El orden tambien importa -- primero ingerir
         # (cada `_apply` avanza hasta SU sello) y despues alcanzar el presente.
+        self.fsr_medido = []
         for m in self.sensor.drain():
+            if self.fila_fsr is not None:
+                self.fsr_medido.append((float(m.timestamp), float(m.z[-1])))
+                self.fsr_ultimo = float(m.z[-1])
             info = self.runner.ingest(m)
             if info is not None:
                 self.nis.append(float(info.nis))
@@ -476,11 +564,42 @@ class Teleop:
         # de MUESTRA y la entrega despues, asi que un filtro avanzado hasta
         # ahora esta adelante de lo que llega y lo descarta.
         self.runner.advance_to_safe(self.t)
+        if self.geo is not None:
+            self._contacto()
 
         y_plant = np.asarray(self.data.sensordata, dtype=np.float64)[self.imu_rows_plant]
         u0 = np.zeros(self.model_b.nu)
         y_est = h_dyn(self.ekf.x, u0, self.model_b, self.data_b)[self.imu_rows]
         return y_plant, y_est
+
+    def _contacto(self) -> None:
+        """Llena el estado de contacto del tick: fuerza y d de la planta, d del
+        estimado y las correcciones que `EKFFSR` aplico.
+
+        `d` sale del MISMO `ContactGeometry` que usa el filtro, para la verdad
+        con la `qpos` de la planta en `x[:nv]`: mapa y planta comparten `nv` y
+        orden de juntas. Una correccion se sella con su paso (`Contacto.paso`),
+        no con el tick: el runner avanza hasta el paso de la muestra ANTES de
+        corregir, asi que `t0 + paso * dt` es el instante en que ocurrio.
+        """
+        assert self.geo is not None
+        nv = int(self.model_b.nv)
+        x_planta = np.zeros(self.nx)
+        x_planta[:nv] = np.asarray(self.data.qpos[:nv], dtype=np.float64)
+        self.d_planta = self.geo.distance(x_planta)[0]
+        self.d_est = self.geo.distance(self.ekf.x)[0]
+        if self.fila_fsr is not None:
+            self.fuerza_planta = float(self.data.sensordata[self.fila_fsr_planta])
+        self.correcciones = []
+        if isinstance(self.ekf, EKFFSR):
+            for c in self.ekf.tomar_contactos():
+                if c.innovacion is None:
+                    continue          # OFF con el estimado afuera: no se toco nada
+                t_c = self.runner.t0 + c.paso * self.dt
+                self.correcciones.append((t_c, c.en_contacto, c.d_antes))
+                self.n_on += c.en_contacto
+                self.n_off += not c.en_contacto
+                self.t_ultima = (t_c, c.en_contacto)
 
     @property
     def q_true(self) -> Any:
@@ -579,6 +698,56 @@ def _mode_text(teleop: Teleop) -> str:
     modo = "paso a paso" if teleop.step_mode else "continuo"
     return (f"finura {teleop.level + 1}/{len(NIVELES)}: {speed:g} rad/s, "
             f"paso {step:g} grados  |  modo {modo} (M)")
+
+
+def _texto_contacto(teleop: Teleop) -> str:
+    """El estado del FSR para la esquina del visor. Distancias en mm, < 0 adentro."""
+    if teleop.fila_fsr is None:
+        fsr = "FSR   sin lectura (--sin-fsr): nadie corrige"
+    elif np.isnan(teleop.fsr_ultimo):
+        fsr = "FSR   esperando la primera muestra"
+    else:
+        on = "ON " if teleop.fsr_ultimo > FSR_UMBRAL_N else "OFF"
+        fsr = f"FSR   {teleop.fsr_ultimo:5.1f} N  {on}  (umbral {FSR_UMBRAL_N:g} N)"
+    return "\n".join([
+        fsr,
+        f"d planta    {1e3 * teleop.d_planta:+6.1f} mm",
+        f"d estimado  {1e3 * teleop.d_est:+6.1f} mm",
+        f"correcciones  ON {teleop.n_on}   OFF {teleop.n_off}",
+    ])
+
+
+def _pintar_cupula(scn: Any, teleop: Teleop) -> None:
+    """Pinta la cupula del FANTASMA segun lo que hizo el FSR. Va despues de `draw_ghost`.
+
+    El fantasma ya dibuja la cupula (el modelo ciego es el brazo con
+    adaptador); esto le superpone una esfera apenas mas grande, de color:
+    verde una correccion ON reciente, naranja una OFF que lo saco del solido
+    (los dos durante `DESTELLO_S`), rojo si el estimado esta ADENTRO de un
+    solido y nadie lo corrigio. Nada si esta afuera y quieto: el fantasma solo.
+    Los colores son los de los marcadores de la ventana de contacto.
+    """
+    from erp.viz.live import CONTACT_OFF, CONTACT_ON
+
+    g = mj.mj_name2id(teleop.model_b, mj.mjtObj.mjOBJ_GEOM, "fsr_tip")
+    if g < 0 or scn.ngeom >= scn.maxgeom:
+        return
+    reciente = teleop.t_ultima is not None and teleop.t - teleop.t_ultima[0] < DESTELLO_S
+    if reciente:
+        assert teleop.t_ultima is not None
+        rgb = np.array(CONTACT_ON if teleop.t_ultima[1] else CONTACT_OFF) / 255.0
+        rgba = np.r_[rgb, 0.85]
+    elif teleop.d_est < 0.0:
+        rgba = np.array([0.90, 0.10, 0.10, 0.75])
+    else:
+        return
+    db = teleop.data_b          # `ghost_data()` ya corrio mj_forward con x_hat
+    r = 1.06 * float(teleop.model_b.geom_size[g][0])
+    mj.mjv_initGeom(scn.geoms[scn.ngeom], mj.mjtGeom.mjGEOM_SPHERE,
+                    np.array([r, 0.0, 0.0]), np.asarray(db.geom_xpos[g], dtype=np.float64),
+                    np.asarray(db.geom_xmat[g], dtype=np.float64),
+                    rgba.astype(np.float32))
+    scn.ngeom += 1
 
 
 def build_panel(teleop: Teleop) -> Any:
@@ -795,11 +964,16 @@ def run(teleop: Teleop, with_plots: bool, with_panel: bool = True) -> None:
         # variable -- en uno compartido las curvas no se distinguian. Los ejes
         # y son FIJOS (ver `erp.viz.live`): con autoescala el ruido de 0.05
         # m/s^2 en reposo llena el grafico y parece que el brazo tiembla.
+        # Una cuarta ventana con mapa de solidos: fuerza del FSR sobre la
+        # distancia con signo de la cupula, verdad contra estimado, con cada
+        # correccion de contacto marcada. Tambien con `--sin-fsr`: ahi es donde
+        # se ve el estimado adentro del solido sin que nadie lo saque.
         plots = LivePlots(
             links=["link1", "link2"],
             joint_labels=["rot", "link1", "link2"],
             nis_target=float(teleop.imu_rows.size),
             title=f"EKF ciego vs planta (degrade = {teleop.degrade})",
+            contact=None if teleop.geo is None else (FSR_UMBRAL_N, teleop.pen_on),
         )
 
     panel = build_panel(teleop) if with_panel else None
@@ -830,16 +1004,29 @@ def run(teleop: Teleop, with_plots: bool, with_panel: bool = True) -> None:
 
             if teleop.show_ghost:
                 draw_ghost(viewer.user_scn, teleop.model_b, teleop.ghost_data())
+                if teleop.geo is not None:
+                    _pintar_cupula(viewer.user_scn, teleop)
             else:
                 viewer.user_scn.ngeom = 0
             # La finura y el modo, sobre la escena: cambian con teclas del
             # visor y sin esto no hay forma de saber en cual se esta. Solo al
-            # cambiar -- `set_texts` toma el lock del visor.
+            # cambiar -- `set_texts` toma el lock del visor. Con mapa se suma el
+            # texto del contacto, que si cambia cada tick: va con el redibujo
+            # de los graficos, no en cada tick.
             texto = _mode_text(teleop)
-            if texto != state["texto"]:
-                viewer.set_texts((mj.mjtFontScale.mjFONTSCALE_150,
-                                  mj.mjtGridPos.mjGRID_BOTTOMLEFT, texto, None))
+            if teleop.geo is not None and state["frame"] % max(1, round(RENDER_HZ / PLOT_HZ)) == 0:
+                texto_fsr = _texto_contacto(teleop)
+            else:
+                texto_fsr = state.get("texto_fsr")
+            if texto != state["texto"] or texto_fsr != state.get("texto_fsr"):
+                textos = [(mj.mjtFontScale.mjFONTSCALE_150,
+                           mj.mjtGridPos.mjGRID_BOTTOMLEFT, texto, None)]
+                if texto_fsr is not None:
+                    textos.append((mj.mjtFontScale.mjFONTSCALE_150,
+                                   mj.mjtGridPos.mjGRID_TOPRIGHT, texto_fsr, None))
+                viewer.set_texts(textos)
                 state["texto"] = texto
+                state["texto_fsr"] = texto_fsr
             viewer.sync()
             if panel is not None:
                 panel.refresh()
@@ -853,9 +1040,18 @@ def run(teleop: Teleop, with_plots: bool, with_panel: bool = True) -> None:
                 for t_m, z, nis in teleop.updates:
                     plots.push_measurement(t_m, z[acc])
                     plots.push_nis(t_m, nis)
-                state["frame"] += 1
-                if state["frame"] % max(1, round(RENDER_HZ / PLOT_HZ)) == 0:
-                    plots.redraw()
+                if plots.contact is not None:
+                    plots.contact.push_state(teleop.t, teleop.fuerza_planta,
+                                             teleop.d_planta, teleop.d_est)
+                    for t_m, f in teleop.fsr_medido:
+                        plots.contact.push_measurement(t_m, f)
+                    for t_c, on, d in teleop.correcciones:
+                        plots.contact.push_correction(t_c, on, d)
+            # El contador corre con o sin graficos: tambien marca el ritmo del
+            # texto de contacto en el visor.
+            state["frame"] += 1
+            if plots is not None and state["frame"] % max(1, round(RENDER_HZ / PLOT_HZ)) == 0:
+                plots.redraw()
 
         timer = QtCore.QTimer()
         timer.timeout.connect(tick)
@@ -878,22 +1074,45 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--prop", choices=tuple(PROP_MODELS), default="none",
                     help="objeto del entorno contra el cual chocar. UNO POR VEZ:"
                          " son archivos distintos, no banderas acumulables")
+    ap.add_argument("--sin-fsr", action="store_true",
+                    help=f"con --prop {'/'.join(FSR_PROPS)}: el filtro tiene el mapa pero"
+                         " NO recibe el FSR. La falsificacion: el estimado entra al"
+                         " solido y nadie lo saca")
     args = ap.parse_args(argv)
+    con_fsr = args.prop in FSR_PROPS
+    if args.sin_fsr and not con_fsr:
+        ap.error(f"--sin-fsr solo tiene sentido con --prop {' / '.join(FSR_PROPS)}")
 
-    # La PLANTA lleva el prop; el FILTRO corre siempre sobre el brazo pelado.
-    # Las dos rutas se eligen aca y no adentro de `Teleop`, para que el unico
-    # lugar del script donde se decide que modelo se carga sea este.
+    # La PLANTA lleva el prop; el FILTRO corre siempre sin el (piso apagado
+    # por `blind_variant`, sin props). Las rutas se eligen aca y no adentro de
+    # `Teleop`, para que el unico lugar del script donde se decide que modelo
+    # se carga sea este.
+    #
+    # Con FSR, el filtro corre sobre el brazo CON adaptador y no sobre el
+    # pelado: es el unico que tiene la fila `fsr_force` (la 15), el adaptador
+    # no tiene masa y `test_plant.py` verifica que la dinamica es identica. El
+    # MAPA de solidos para el contacto es la planta misma -- es el unico modelo
+    # que sabe donde estan el piso y las escaleras -- y entra solo como
+    # medicion, nunca en la dinamica.
     plant_xml = resolve_repo_path(*PROP_MODELS[args.prop].parts)
-    blind_xml = resolve_repo_path(*XML_RELATIVE.parts)
+    blind_xml = resolve_repo_path(*(PROP_MODELS["fsr"] if con_fsr else XML_RELATIVE).parts)
     if args.prop != "none":
         print(f"prop: {args.prop} ({PROP_MODELS[args.prop].name})."
-              " El filtro NO lo tiene en su modelo.")
-    teleop = Teleop(plant_xml, args.degrade, blind_xml=blind_xml)
+              " El filtro NO lo tiene en su dinamica.")
+    if con_fsr:
+        print("FSR: " + ("NO se le da al filtro (--sin-fsr)." if args.sin_fsr else
+                         f"entra al EKFFSR como ON/OFF, umbral {FSR_UMBRAL_N:g} N."))
+    teleop = Teleop(plant_xml, args.degrade, blind_xml=blind_xml,
+                    geometria_xml=plant_xml if con_fsr else None,
+                    pen_on=PEN_ON_M, fsr=con_fsr and not args.sin_fsr)
     run(teleop, with_plots=not args.no_plots, with_panel=not args.no_panel)
 
-    print(f"\n=== teleop (degrade = {args.degrade}, prop = {args.prop}) ===")
+    print(f"\n=== teleop (degrade = {args.degrade}, prop = {args.prop}"
+          f"{', sin FSR' if args.sin_fsr else ''}) ===")
     print(f"{teleop.runner.steps} predicts, {teleop.applied} actualizaciones aplicadas, "
           f"{teleop.runner.discarded} descartadas")
+    if con_fsr:
+        print(f"contacto: {teleop.n_on} correcciones ON, {teleop.n_off} OFF")
     if teleop.nis:
         rep = consistency_report(np.asarray(teleop.nis), nz=int(teleop.imu_rows.size),
                                  warmup_fraction=0.5)

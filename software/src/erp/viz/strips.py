@@ -16,7 +16,7 @@ import numpy.typing as npt
 
 from erp.core.types import Array
 
-__all__ = ["RingBuffer"]
+__all__ = ["ContactTrace", "RingBuffer"]
 
 
 class RingBuffer:
@@ -87,3 +87,45 @@ class RingBuffer:
         """Forget everything held; capacity and width are unchanged."""
         self._i = 0
         self._n = 0
+
+
+class ContactTrace:
+    """The histories behind the FSR / contact strip, in SI units. Pure numpy.
+
+    Three things are kept apart because they arrive at three different rates
+    and mean three different things:
+
+    * the **state**, pushed once per render tick: the plant's fingertip force
+      (N, the ``<touch>``), the plant's signed distance ``d(x)`` from the dome
+      to the nearest known solid and the estimate's ``d(x_hat)`` (m, negative
+      inside). On hardware there is no plant, so ``force`` and ``d_true`` are
+      NaN, which a strip draws as a gap rather than as a zero that looks like
+      "free";
+    * the **measurement**, ~20 Hz, at its sample instant: the force the sensor
+      reported, N;
+    * the **corrections** the filter actually applied, split by kind, at the
+      estimate's ``d`` *before* the correction (m) -- which is the point: an
+      ON marker sits where the estimate was when the FSR pulled it to the
+      surface, an OFF marker where it was when the FSR pushed it out.
+
+    An OFF reading with the estimate outside the solid is not a correction
+    (``EKFFSR`` leaves ``x`` and ``P`` untouched) and must not be pushed here.
+    """
+
+    def __init__(self, capacity: int) -> None:
+        self.state = RingBuffer(capacity, 3)        # force N, d_true m, d_est m
+        self.measured = RingBuffer(capacity, 1)     # force N
+        self.on = RingBuffer(capacity, 1)           # d_before m
+        self.off = RingBuffer(capacity, 1)          # d_before m
+
+    def push_state(self, t: float, force_n: float, d_true_m: float, d_est_m: float) -> None:
+        """Plant force (N), plant ``d`` and estimated ``d`` (m) at ``t`` (s)."""
+        self.state.append(t, (force_n, d_true_m, d_est_m))
+
+    def push_measurement(self, t: float, force_n: float) -> None:
+        """One FSR sample, N, stamped at its sample instant."""
+        self.measured.append(t, (force_n,))
+
+    def push_correction(self, t: float, on: bool, d_before_m: float) -> None:
+        """A contact correction ``EKFFSR`` applied at ``t``: ON or OFF-push."""
+        (self.on if on else self.off).append(t, (d_before_m,))

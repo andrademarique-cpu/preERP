@@ -14,7 +14,7 @@ from __future__ import annotations
 import numpy as np
 import pytest
 
-from erp.viz.strips import RingBuffer
+from erp.viz.strips import ContactTrace, RingBuffer
 
 # ------------------------------------------------------------- RingBuffer
 
@@ -332,3 +332,38 @@ def test_a_full_scene_truncates_rather_than_overruns() -> None:
     mj.mj_forward(mb, db)
     scene = mj.MjvScene(mb, maxgeom=5)
     assert draw_ghost(scene, mb, db) == 5
+
+
+# ------------------------------------------------------------- ContactTrace
+
+
+def test_contact_corrections_land_in_their_own_strip_by_kind() -> None:
+    """ON and OFF-push are different events; mixing them would hide which one
+    pulled the estimate where. Broken variant: one buffer for both, which then
+    cannot say which marker is which."""
+    c = ContactTrace(8)
+    c.push_correction(0.10, True, -0.0002)
+    c.push_correction(0.15, False, -0.004)
+    c.push_correction(0.20, True, 0.001)
+    t_on, d_on = c.on.view()
+    t_off, d_off = c.off.view()
+    np.testing.assert_array_equal(t_on, [0.10, 0.20])
+    np.testing.assert_array_equal(d_on[:, 0], [-0.0002, 0.001])
+    np.testing.assert_array_equal(t_off, [0.15])
+    np.testing.assert_array_equal(d_off[:, 0], [-0.004])
+
+    merged = RingBuffer(8, 1)
+    for t, _on, d in ((0.10, True, -0.0002), (0.15, False, -0.004), (0.20, True, 0.001)):
+        merged.append(t, (d,))
+    assert len(merged) == 3 and len(c.on) != len(merged), "the merged strip loses the kind"
+
+
+def test_contact_state_keeps_nan_truth_for_hardware() -> None:
+    """On the arm there is no plant: force and d_true are NaN, not 0. A 0
+    would draw as "free, no force" -- a claim, not an absence."""
+    c = ContactTrace(4)
+    c.push_state(0.0, float("nan"), float("nan"), -0.001)
+    c.push_measurement(0.0, 12.5)
+    _, S = c.state.view()
+    assert np.isnan(S[0, 0]) and np.isnan(S[0, 1]) and S[0, 2] == -0.001
+    assert c.measured.view()[1][0, 0] == 12.5

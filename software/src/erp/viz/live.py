@@ -17,6 +17,13 @@ the simulated demo shows the accelerometer alone, the hardware demo
 (``scripts/demo_teleop_real.py``) adds the gyro beside it, because on the real
 arm the gyro is where the motion and the transport lag read most clearly.
 
+**A fourth window, opt-in: FSR / contact** (``contact=``). Fingertip force
+over the dome's signed distance to the nearest solid, plant against estimate,
+with every contact correction ``EKFFSR`` applied marked where the estimate was
+when it happened. Its buffers are :class:`~erp.viz.strips.ContactTrace`, which
+is pure numpy and tested; this module only draws them. No mujoco here either:
+the caller computes ``d(x)`` through its ``ContactGeometry`` and pushes numbers.
+
 **The y axes are fixed, deliberately.** Auto-ranging zooms onto whatever is on
 screen, so an arm at rest fills the plot with 0.05 m/s^2 of sensor noise and
 looks like it is shaking. Fixed limits keep the scale of *motion*. The
@@ -51,9 +58,23 @@ import numpy as np
 import numpy.typing as npt
 import pyqtgraph as pg
 
-from erp.viz.strips import RingBuffer
+from erp.viz.strips import ContactTrace, RingBuffer
 
 __all__ = ["LivePlots"]
+
+# Contact corrections. Okabe-Ito bluish green and vermillion: an ON pulls the
+# estimate onto the surface, an OFF pushes it out of the solid. The script's 3D
+# marker uses the same two colours so a strip marker and a dome flash match.
+CONTACT_ON = (0, 158, 115)
+CONTACT_OFF = (213, 94, 0)
+
+# Fixed limits of the contact window. Force: the plant's dome reads 24-32 N
+# resting on the floor under the servos (`scripts/medir_penetracion.py`), so
+# 0..40 N shows a press with room. Distance: the estimate has been measured up
+# to ~22 mm inside the floor with no FSR (`medir_penetracion.py`, piso/nada),
+# and a jog lifts the tip a few cm, so -25..+40 mm.
+_FORCE_RANGE = (-2.0, 40.0)
+_DIST_RANGE_MM = (-25.0, 40.0)
 
 # Plant / measured / estimate. Colour-blind-safe and legible on the dark
 # background pyqtgraph defaults to.
@@ -96,6 +117,7 @@ class LivePlots:
         window_s: float = 10.0,
         push_hz: float = 30.0,
         title: str = "blind EKF vs plant",
+        contact: tuple[float, float] | None = None,
     ) -> None:
         """
         Parameters
@@ -122,6 +144,14 @@ class LivePlots:
             Seconds of history retained. Older samples fall off the left.
         push_hz:
             The rate the caller intends to push at; sets the buffer capacity.
+        contact:
+            ``(threshold_n, pen_on_m)`` to add the FSR / contact window, or
+            ``None`` (default) for none. The threshold is the force above
+            which the filter reads the FSR as ON (N); ``pen_on`` is how far
+            the dome sinks into a surface it rests on (m), i.e. where an ON
+            correction puts the estimate. Both are drawn as reference lines,
+            because a strip of force or distance without them cannot be read.
+            Fed through :attr:`contact` (a :class:`ContactTrace`).
         """
         self.links = list(links)
         self.kinds = [(str(s), str(u), (float(r[0]), float(r[1]))) for s, u, r in kinds]
@@ -218,6 +248,59 @@ class LivePlots:
         self._p_nis.addItem(target)
         self._p_nis.setLogMode(y=True)   # a degraded run reaches 1e4; linear hides the good one
 
+        self.contact: ContactTrace | None = None
+        if contact is not None:
+            self.contact = ContactTrace(cap)
+            self._build_contact_window(contact, truth_label, title, dash)
+
+    def _build_contact_window(self, contact: tuple[float, float], truth_label: str,
+                              title: str, dash: Any) -> None:
+        """Force over signed distance, t linked to the joint strip."""
+        threshold_n, pen_on_m = contact
+        win: Any = pg.GraphicsLayoutWidget(show=True, title=f"FSR / contact -- {title}")
+        win.resize(720, 640)
+        k = len(self.windows)
+        win.move(40 + 40 * k, 40 + 40 * k)
+        self.windows.append(win)
+        ref = pg.mkPen(_TARGET, style=dash)
+
+        self._p_force: Any = win.addPlot(row=0, col=0, title="fingertip force (FSR)")
+        self._setup(self._p_force, "N", _FORCE_RANGE, last=False)
+        self._p_force.addLegend(offset=(-10, 10))
+        self._p_force.setXLink(self._p_joint)
+        # connect="finite": on hardware the plant force is NaN, and a gap is
+        # the honest drawing of "no truth here".
+        self._c_force = self._p_force.plot(pen=pg.mkPen(_TRUTH, width=2),
+                                           name=truth_label, connect="finite")
+        self._c_force_meas = self._p_force.plot(pen=None, symbol="o", symbolSize=5,
+                                                symbolBrush=_MEAS, symbolPen=None,
+                                                name="measured")
+        self._p_force.addItem(pg.InfiniteLine(pos=threshold_n, angle=0, pen=ref,
+                                              label=f"ON above {threshold_n:g} N",
+                                              labelOpts={"position": 0.9, "color": _TARGET}))
+
+        self._p_dist: Any = win.addPlot(
+            row=1, col=0,
+            title=f"dome to nearest solid: signed distance (< 0 inside; "
+                  f"clipped at {_DIST_RANGE_MM[1]:g} mm = far)",
+        )
+        self._setup(self._p_dist, "mm", _DIST_RANGE_MM, last=True)
+        self._p_dist.addLegend(offset=(-10, 10))
+        self._p_dist.setXLink(self._p_joint)
+        self._c_d_true = self._p_dist.plot(pen=pg.mkPen(_TRUTH, width=2),
+                                           name=truth_label, connect="finite")
+        self._c_d_est = self._p_dist.plot(pen=pg.mkPen(_EST, width=2, style=dash),
+                                          name="estimate d(x_hat)")
+        self._c_on = self._p_dist.plot(pen=None, symbol="t1", symbolSize=9,
+                                       symbolBrush=CONTACT_ON, symbolPen=None,
+                                       name="ON: pulled to surface")
+        self._c_off = self._p_dist.plot(pen=None, symbol="t", symbolSize=9,
+                                        symbolBrush=CONTACT_OFF, symbolPen=None,
+                                        name="OFF: pushed out")
+        self._p_dist.addItem(pg.InfiniteLine(pos=0.0, angle=0, pen=ref))
+        self._p_dist.addItem(pg.InfiniteLine(pos=-1e3 * pen_on_m, angle=0,
+                                             pen=pg.mkPen(CONTACT_ON, style=dash)))
+
     @staticmethod
     def _setup(p: Any, units: str, y_range: tuple[float, float], *, last: bool) -> None:
         p.showGrid(x=True, y=True, alpha=0.25)
@@ -272,6 +355,24 @@ class LivePlots:
 
         t_n, N = self.nis.view()
         self._c_nis.setData(t_n, np.clip(N.ravel(), 1e-3, None))
+
+        if self.contact is not None:
+            c = self.contact
+            t_s, S = c.state.view()
+            self._c_force.setData(t_s, S[:, 0])
+            # Clipped at the top so a far-away dome rides the upper edge instead
+            # of leaving the plot empty: at rest it is ~186 mm above the floor,
+            # far outside a range chosen to resolve sub-mm contact. The title
+            # says so. Not clipped below: a deep estimate must stay visible.
+            top = _DIST_RANGE_MM[1]
+            self._c_d_true.setData(t_s, np.minimum(1e3 * S[:, 1], top))
+            self._c_d_est.setData(t_s, np.minimum(1e3 * S[:, 2], top))
+            t_m, F = c.measured.view()
+            self._c_force_meas.setData(t_m, F[:, 0])
+            t_on, D_on = c.on.view()
+            self._c_on.setData(t_on, 1e3 * D_on[:, 0])
+            t_off, D_off = c.off.view()
+            self._c_off.setData(t_off, 1e3 * D_off[:, 0])
 
     def close(self) -> None:
         for win in self.windows:
