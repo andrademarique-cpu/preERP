@@ -50,23 +50,25 @@ run on their own machine. Both runs were right and both conclusions were
 wrong. Re-run a fact before you re-state it, and say which machine you
 ran it on.
 
-**On machine A, Windows Smart App Control blocks MuJoCo** (verified
-2026-11-09). `import mujoco` fails with `ImportError: initialization
-failed`, and underneath it with "An Application Control policy has
-blocked this file" on `mujoco\_enums.cp311-win_amd64.pyd`. It fails in
-any terminal, not only in Claude Code.
+**On machine A, Windows Smart App Control blocked MuJoCo on 2026-11-09.
+It was then turned off, and `import mujoco` works again** (re-verified
+2026-11-15: mujoco 3.11.0 imports, full suite and golden check green).
+Keep the diagnosis, because SAC can come back on, for example after a
+Windows reset. The symptom is `import mujoco` failing with `ImportError:
+initialization failed`. Underneath it is "An Application Control policy
+has blocked this file" on `mujoco\_enums.cp311-win_amd64.pyd`, in any
+terminal.
 - `HKLM\SYSTEM\CurrentControlSet\Control\CI\Policy\VerifiedAndReputablePolicyState`
-  is `1` (enforcing).
-- The CodeIntegrity/Operational log records events 3033 and 3077 for
-  the file.
-- The `.pyd`s date from 2026-08-15 and worked in September, so the
-  policy changed, not the package.
+  read `1` (enforcing).
+- CodeIntegrity/Operational logged events 3033 and 3077 for the file.
 
-Every `mujoco`-marked test, the golden check and every script then fail
-to run. ruff, mypy and the fast tests still work. Treat that as an
-environment failure, not a regression. Three test modules
+While it is blocked, every `mujoco`-marked test, the golden check and
+every script fail to run, and that is an environment failure, not a
+regression. ruff, mypy and the fast tests still work. Three test modules
 (`test_analysis`, `test_dynamics`, `test_plant`) import mujoco at module
 scope, so they error at collection even under `-m "not mujoco"`.
+**Run `python -c "import mujoco"` before trusting any red mujoco test on
+A.**
 
 `EKF` also still carries `scipy` 1.17.1. Nothing imports it; that is left
 over from an install older than P0's dependency change. Re-run
@@ -80,16 +82,16 @@ pip install -e ".[dev]"                 # add [app] for real hardware, [viz] for
 conda env create -f environment.yml     # installs -e .[dev,viz]; creates `erp` (machine B uses `EKF`)
 
 # The checks CI runs, in the order ci.yml runs them.
-# Re-run 2026-11-09 on machine A (`erp`), clean tree at c29e5b7 (feat/ekf-fsr):
+# Re-run 2026-11-15 on machine A (`erp`), clean tree at a4cd8cb (feat/ekf-fsr):
 ruff check software/src software/tests  # 5 ERRORS, all in software/tests/test_EKF.py -- see below
 mypy software/src                       # strict; clean (50 files)
 grep -rEl ...                           # import-direction, the 3rd step -- BEFORE pytest; prints nothing
-pytest -q                               # UNVERIFIED on A (Smart App Control blocks mujoco, above).
-                                        # c29e5b7's message reports 403 passed, 1 skipped.
+pytest -q                               # 413 passed, 1 skipped, ~4 s (A, 2026-11-17, FSR work committed)
 
-# software/tests/test_EKF.py (added in e9bfb13) is a scratch file: three
-# unused imports and `print("Todo good")`. No tests in it. It breaks ruff
-# (I001 + 4x F401), and therefore CI. Delete it, or turn it into a real test.
+# software/tests/test_EKF.py (added in e9bfb13, still there at a4cd8cb) is a
+# scratch file: three unused imports and `print("Todo good")`. No tests in it.
+# It breaks ruff (I001 + 4x F401), and therefore CI. Delete it, or turn it
+# into a real test. It is the ONLY thing keeping this branch's CI red.
 
 # The earlier red test is FIXED. f0a8e49 had made test_the_scenery_is_index_safe
 # assert that the plant's floor does not collide. That assertion now lives in
@@ -98,7 +100,7 @@ pytest -q                               # UNVERIFIED on A (Smart App Control blo
 
 # The fast loop while working. `mujoco` marks the tests that need mujoco AND
 # the Git-LFS model assets -- that shared requirement, not what they assert.
-pytest -q -m "not mujoco"               # 313 passed, 1 skipped, 38 deselected, ~3 s
+pytest -q -m "not mujoco"               # 341 passed, 1 skipped, 72 deselected, ~3 s (A, 2026-11-15)
                                         # (+3 collection errors when mujoco cannot import)
 
 # The golden check. Not a separate CI step: `test_golden_run.py` imports
@@ -488,6 +490,38 @@ they only make sense together.
    same way, never as a copy of that arithmetic. It is still blind, so
    do not give it a `u` parameter.
 
+   **The FSR reaches it as a row of the `Measurement`** (2026-11-15,
+   committed 2026-11-17). The row is `fsr_force`, the
+   `<touch>`, in **newtons**: row 15 of `MyPalletizer260_fsr.xml`, the
+   same in the plant and the blind model. It rides in the same sample as
+   the IMUs. With `fila_fsr` set, `EKFFSR.update` splits it off. The other
+   rows go to `EKF.update`, and the FSR row goes to
+   `update_contacto(F > umbral_n)`, which returns the IMUs' `(y, NIS)`.
+   So `FilterRunner`, `Measurement` and the `Sensor` ABC are unchanged,
+   and the contact is applied at its own sample step.
+   - **Never let that row reach plain `EKF.update`.** The blind model's
+     touch reads 0 always, so the whole force becomes innovation;
+     `test_ekf_fsr.py` carries the falsification.
+   - Each reading is recorded as a `Contacto` (`paso`, force, ON, `d`
+     before, innovation, NIS); `tomar_contactos()` drains them.
+   - `demo_teleop.py --prop fsr|fsr_escaleras` uses this. Before, that
+     flag loaded the dome into the plant and built a plain `EKF`, so the
+     FSR reached nothing. The flag now adds a fourth `LivePlots` window
+     (`contact=`, buffers in `viz.strips.ContactTrace`) and a coloured
+     dome on the ghost; `--sin-fsr` is the falsification.
+   - **The FSR's rate is the whole story, not its noise.** Measured in
+     `medir_penetracion.py`'s `correr` docstring: 20 Hz in the IMU line
+     leaves 10.97 mm of estimate penetration against 22.27 mm with no
+     FSR; 60 Hz gives 0.80 mm. That 60 Hz run raised the IMU rate too,
+     so it does not isolate the contact rate alone. Noise σ 0.2 N vs 0
+     is bit-identical.
+   - **The real FSR is characterised in
+     `electronics/FSR/ensayo-fsr-20261109-1931.csv`** (Git LFS since
+     2026-11-17; 50 load cycles, two load cells, divider mV, R). Read
+     before trusting the 1 N threshold: the real sensor turns on at
+     ~0.6 N, at 1 N its median reading is barely above rest (p10 at rest),
+     and it flattens near 2 V around 15 N, below the plant's 24–32 N.
+
    Why the dynamics stay contact-free, measured with
    `scripts/medir_penetracion.py`: with the solid floor in the blind
    model and the soft default contact, the estimate stuck **5.97 mm**
@@ -793,7 +827,7 @@ re-derive. Each has a test that would fail if it stopped being true.
 | `software/src/erp/calibration/` | `rest` — `calibration_from_samples` (moved here from `sensors/imu_serial.py` at P6, still re-exported there), `rest_bias` (the offline counterpart of `SerialIMUSensor.calibrate`). **English** | `core/` + numpy **only**; `sensors/` imports this, never the reverse |
 | `software/src/erp/analysis/` | `lag` (`estimate_lag`), `site` (`propagate_to_site`), `consistency` (`ConsistencyReport`, `consistency_report`). Landed at P8. `penetracion` (`penetracion`, `resumen_penetracion`, numpy only), since `e9bfb13`. **Spanish** — forced: § 5.3 required moving the first two with their Spanish docstrings intact | `core/` + `sim/`; imports mujoco (via `h`/`H`), so a test that exercises it end to end carries the `mujoco` marker |
 | `software/src/erp/viz/` | `geometry` (`sigma_per_axis`, `ellipsoid_axes`, `principal_tilt_deg` — pure numpy), `theme`, `figures` (`three_way`, `sensor_compare`, `effector_band`); and, from the teleop demo, `strips` (`RingBuffer`), `ghost` (`draw_ghost` — the fourth mujoco caller) and `live` (the pyqtgraph window, `[live]` extra). Landed at P8; the old "geometry only, no backend imports" rule was overturned by ADR-0002 § 4.2. **English** | matplotlib allowed, gated behind `[viz]`. `__init__.py` re-exports **only** `geometry` and nothing else -- not `strips`, `ghost` or `live` -- so `import erp.viz` stays numpy-only and CI (which installs `.[dev]`) can import it |
-| `software/tests/` | 372 tests. `conftest` (fake serial port + IMU layout), `test_sensor_contract` (one suite over all three `Sensor`s), `test_imu_serial`, `test_clock`, `test_replay_log`, `test_paths`, `test_plant` (10, incl. the scenery guards), `test_golden_run`, `test_robot` (incl. the J3(J2) envelope guard, run over both arms), `test_trajectory` (incl. `slew_limit`, each case paired with a broken variant), `test_core_clock`, `test_dynamics`, `test_ekf_linear`, `test_fusion_runner` (47, no mujoco — carries a verbatim copy of the old `run_imu_ekf` as a bit-identity oracle), `test_calibration` (11, 9 of them fast — same oracle trick against notebook cell 19's block), `test_config` (24, 21 of them fast — every malformed-config case paired with the good file it mutates), `test_analysis` (20 — verbatim oracles for the two moved functions, plus a broken variant per metric), `test_viz` (13 — the ellipse arithmetic runs always, the figures skip without `[viz]`), `test_live_sensor` (12, all fast — the live sampler's grid and latency), `test_viz_live` (14, 9 fast — the ring buffer always, the ghost geoms behind the `mujoco` marker; the ghost half uses `mjv_updateScene` as its oracle, never a hand-written `dataid`) | — |
+| `software/tests/` | 414 tests (A, 2026-11-15) (the per-file counts below are older; re-count rather than quote them). `conftest` (fake serial port + IMU layout), `test_sensor_contract` (one suite over all three `Sensor`s), `test_imu_serial`, `test_clock`, `test_replay_log`, `test_paths`, `test_plant` (10, incl. the scenery guards), `test_golden_run`, `test_robot` (incl. the J3(J2) envelope guard, run over both arms), `test_trajectory` (incl. `slew_limit`, each case paired with a broken variant), `test_core_clock`, `test_dynamics`, `test_ekf_linear`, `test_fusion_runner` (47, no mujoco — carries a verbatim copy of the old `run_imu_ekf` as a bit-identity oracle), `test_calibration` (11, 9 of them fast — same oracle trick against notebook cell 19's block), `test_config` (24, 21 of them fast — every malformed-config case paired with the good file it mutates), `test_analysis` (20 — verbatim oracles for the two moved functions, plus a broken variant per metric), `test_viz` (13 — the ellipse arithmetic runs always, the figures skip without `[viz]`), `test_live_sensor` (12, all fast — the live sampler's grid and latency), `test_viz_live` (14, 9 fast — the ring buffer always, the ghost geoms behind the `mujoco` marker; the ghost half uses `mjv_updateScene` as its oracle, never a hand-written `dataid`) | — |
 | `scripts/` | `make_golden_run.py` — generates and re-checks the golden fixture. **Emptied at P8**: it now holds `run_pipeline`, `_metadata` and `main` and nothing else, i.e. configuration and a call. `demo_three_way.py` — the live three-way demo (plant truth vs noisy virtual sensor vs EKF estimate), P8's acceptance artifact. `demo_teleop.py` — the interactive teleop demo, outside the roadmap; `efc8df7`'s render bugs were fixed on 2026-09-22 and `/goal` is its guide. `demo_teleop_real.py` — its hardware sibling (2026-09-23): the same loop driving the real arm through `MyPalletizerArm` with the notebook's cells 18–19 EKF on the real IMUs; defaults to `--arm dry --imu sim`, **not yet run on hardware**, see `docs/demo_teleop.md` § 14b. It imports `demo_teleop` for the keymap and panel and carries a third copy of the notebook's `JMAP`. All four **Spanish** | not linted by CI, and not type-checked either (`mypy software/src` does not reach them) |
 | `data/processed/` | `golden_ekf_run.npz`, the frozen run (Git-LFS). `j2j3_envelope.csv`, the fitted J3(J2) envelope that `CoupledLimit` reads; regenerated by the fit cell in `Palletizer.ipynb`, history in `docs/j2j3_envelope_handoff.md`. `plan_escaleras.csv`, the stair tour written by `planear_escaleras.py` | — |
 | `scripts/` (after `07f7ce8`) | Three new **Spanish** scripts. `espejo_brazo.py` mirrors the real arm into MuJoCo, reading joint angles over serial; by default **it releases the servos** (`--no-soltar` to keep them; `--sin-brazo` for no hardware). `planear_escaleras.py` builds a collision-free cubic-spline tour over the six measured stair poses; `--sin-evitar` is its falsification. `medir_penetracion.py` counts how far the blind estimate passes into solids, per scenario and per filter model (`--fsr` for `EKFFSR`). `demo_teleop.py` gained `--prop fsr` and `Teleop(geometria_xml=, pen_on=)` | not linted or type-checked by CI |
@@ -802,7 +836,7 @@ re-derive. Each has a test that would fail if it stopped being true.
 | `mechanical/mujoco_assets/` | `<dir>/MyPalletizer260.xml` + STL meshes, `axis_xyz.xml`, `scene.xml` (sky + checkered ground + offscreen framebuffer, one `<include/>` — **no longer visual only**, the floor collides), `prop_box.xml`, `prop_stair.xml`, and the two wrapper models that include them (`MyPalletizer260/MyPalletizer260_{box,stair}.xml`). **Git tracks the directory with a capital `P`, and CI is case-sensitive.** All the XML comments here are **Spanish**. **`link2`'s `range` and `ctrlrange` reach negative J3 since 2026-10-21** (−1.6057 / −1.6055 rad, just inside the API's −92°; were `0 …`), because the measured lower stop is negative. `make_golden_run.py --check` stayed green at `rtol=1e-12`: the old 0 limit was never active in the golden run. The J3(J2) coupling is **not** in the XML — a `range` is a per-joint box; `JointMap.coupled` enforces it on commands | — |
 | `config/` | `estimation.yaml` — the fitted IMU layout, axis maps, rates. **Read by `erp.io.config` since P7**, and now the definition rather than documentation; the notebook still mirrors the values by hand. The finger sections moved to ADR-0001 appendix A | — |
 | `data/raw/` | three short IMU logs (raw device columns, calibrated columns, and a layout-named variant) + `palletizer_traj.npz` + two `j2j3_envelope_raw*.csv` (hand-moved joint sweeps, `07f7ce8`) + `stair_poses_*.csv` (hand-measured stair-touch angles; scripts read the **newest** `stair_poses_promedio*.csv`. The 2026-10-21 set was measured **without** the FSR adapter, so its tip sits 36.5 mm too high) | — |
-| `mechanical/mujoco_assets/` (after `07f7ce8`) | New wrappers: `MyPalletizer260_fsr.xml` (the FSR adapter: cylinder plus a `fsr_tip` dome over a `<touch>` pad, stiff contact `solref -1e5 -1e3`; the `efector` site is at the dome), `MyPalletizer260_escaleras.xml`, `MyPalletizer260_fsr_escaleras.xml`, and `prop_escaleras_reales.xml` (the measured real stairs). Contact classes are **`contype`/`conaffinity` bits** that `geoms_por_clase` reads: solids carry `conaffinity = 2`. Keep that convention in any new prop | — |
+| `mechanical/mujoco_assets/` (after `07f7ce8`) | New wrappers: `MyPalletizer260_fsr.xml` (the FSR adapter: cylinder plus a `fsr_tip` dome over a `<touch>` pad; the `efector` site is at the dome. Its inline `solref -1e5 -1e3` was replaced in `a4cd8cb` by the `herramienta` class from `contacto.xml`, see "Tool contact" under Hardware facts), `MyPalletizer260_escaleras.xml`, `MyPalletizer260_fsr_escaleras.xml`, and `prop_escaleras_reales.xml` (the measured real stairs). Contact classes are **`contype`/`conaffinity` bits** that `geoms_por_clase` reads: solids carry `conaffinity = 2`. Keep that convention in any new prop | — |
 | `ros2_ws/src/erp_ros/`, `docs/hardware/`, `electronics/` | **empty** (`.gitkeep` only) | — |
 | `firmware/` | `potentiometer_logger/potentiometer_logger.ino` only — the Teensy IMU firmware is not in this repo | out of scope for Python changes |
 | `docs/theory/`, `docs/adr/` | derivations and decision records — both describe the finger stack | — |
@@ -906,8 +940,15 @@ one now. `get_project_root` is kept as an alias.
 `git log --oneline -5` and `git status` are the authority; this section
 goes stale on its own. **The ADR-0002 work is now committed.**
 
-**As of 2026-11-09 the branch is `feat/ekf-fsr` at `c29e5b7`, not yet
-merged into `main`.** These commits landed after `07f7ce8`:
+**On 2026-11-17 `main` was fast-forwarded to `feat/ekf-fsr`**, after the
+FSR-measurement-row work was committed on top of `a4cd8cb`. Nothing was
+pushed. `docs/cambios-fsr-2026-11.md` (**Spanish**) records that work:
+- the FSR as a `Measurement` row;
+- the contact window in the teleop demo;
+- the half-built `scripts/ajustar_cupula.py`;
+- the bench-test findings.
+
+These commits landed after `07f7ce8`:
 
 - `a2ac051` (2026-10-21, `Fixed J3(J2) Limits`): `CoupledLimit` and
   `JointMap.check_setpoint` in `robot/base.py` (+342 lines), and the
@@ -926,6 +967,12 @@ merged into `main`.** These commits landed after `07f7ce8`:
   the stray `test_EKF.py`, which is why ruff is red now.
 - `c29e5b7`: `EKFFSR` and `ContactGeometry` (architecture item 7). Its
   message carries the penetration measurements quoted there.
+- `a4cd8cb` (`Fixes for penetration measurements`, 2026-11-09):
+  `mechanical/mujoco_assets/contacto.xml` (the `herramienta` contact
+  class) and `scripts/barrer_contacto.py`, the sweep that chose it (see
+  "Tool contact" under Hardware facts). It also touched both arm XMLs,
+  `ekf_fsr.py`, `medir_penetracion.py`, `demo_teleop.py` and
+  `test_plant.py`. The golden check stayed green across it.
 
 The paragraphs below were written at `07f7ce8` and earlier. Three
 commits had landed after an earlier version of this section, and it
@@ -1010,10 +1057,8 @@ as a ghost over the plant, live pyqtgraph strips), and the palletizer
 notebook end to end (trajectory → real arm + MuJoCo replay → IMU log →
 EKF → end-effector covariance). At `07f7ce8` (2026-10-21, `EKF`): 372
 tests, 370 pass, 1 failed (the scenery test, fixed since), 1 skipped. At
-`c29e5b7`, see the Commands block: mypy is clean, ruff is red on
-`test_EKF.py` alone, and the full suite plus the golden check are
-**unverified on machine A**. The commit reports 403 passed and the golden
-check green.
+`a4cd8cb` (machine A, 2026-11-15): 403 passed, 1 skipped, mypy clean,
+golden check `OK ... a rtol=1e-12`. Ruff is red on `test_EKF.py` alone.
 
 ### The half-landed collision work (committed in `f0a8e49`, 2026-09-23)
 
